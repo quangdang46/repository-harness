@@ -576,16 +576,104 @@ contract [Symphony §11]:
   priority as integer, timestamps parsed from ISO-8601.
 - Candidate query filters by `active_states` and `required_labels`.
 
-### 7.3 Future Adapters
+### 7.3 Harness Backlog Adapter
+
+The `HarnessBacklogAdapter` reads dispatchable stories and accepted backlog
+items directly from `harness.db` via `harness-cli query`. This is the native
+work source for repos that generate their own work through Harness intake.
+
+#### 7.3.1 Configuration
+
+```yaml
+source:
+  kind: harness_backlog
+  # Which story statuses are dispatchable (agent can work on them)
+  active_statuses: ["planned", "in_progress"]
+  # Which statuses mean "done, don't touch"
+  terminal_statuses: ["implemented", "verified", "cancelled"]
+  # Also dispatch accepted backlog improvement items
+  include_backlog: false
+  # Path to harness.db (default: repo root)
+  db_path: harness.db
+```
+
+#### 7.3.2 Candidate Fetch
+
+```text
+function fetch_candidates():
+  stories = harness-cli query sql "
+    SELECT id, title, risk_lane, status, created_at
+    FROM story
+    WHERE status IN (active_statuses)
+    ORDER BY created_at ASC
+  "
+
+  backlog = []
+  if config.include_backlog:
+    backlog = harness-cli query sql "
+      SELECT id, title, status, created_at
+      FROM backlog
+      WHERE status = 'accepted'
+      ORDER BY created_at ASC
+    "
+
+  return normalize_to_work_items(stories + backlog)
+```
+
+Normalization to `WorkItem`:
+
+| harness.db field | WorkItem field | Notes |
+|---|---|---|
+| `story.id` | `id`, `identifier` | e.g., `US-015` |
+| `story.title` | `title` | |
+| (read from story file) | `description` | Content of `docs/stories/{id}-*.md` |
+| `story.risk_lane` | `labels` | Added as label: `["normal"]` |
+| `story.status` | `state` | |
+| `"harness_backlog"` | `source_kind` | Constant |
+| `null` | `url` | No external tracker link |
+| (derived from input_type) | `intake_hint` | `new_spec`/`new_initiative` → `dedicated`; else `null` |
+
+#### 7.3.3 State Refresh (Reconciliation)
+
+```text
+function fetch_states_by_ids(ids):
+  return harness-cli query sql "
+    SELECT id, title, risk_lane, status
+    FROM story
+    WHERE id IN (ids)
+  "
+```
+
+If a story's status changed to a terminal status between poll cycles (e.g.,
+human ran `harness-cli story update --status cancelled`), reconciliation will
+stop the running agent.
+
+#### 7.3.4 Story File Discovery
+
+When constructing the prompt, the adapter reads the story packet file:
+
+```text
+function find_story_file(story_id):
+  // Story files follow pattern: docs/stories/{ID}-{slug}.md
+  // e.g., docs/stories/US-015-add-password-reset.md
+  matches = glob("docs/stories/{story_id}-*.md")
+  if matches.length == 1:
+    return read_file(matches[0])
+  if matches.length == 0:
+    return null  // story has no packet file, prompt uses title only
+  return read_file(matches[0])  // take first match
+```
+
+The story file contents are injected into the prompt via the `item.description`
+template variable.
+
+### 7.4 Future Adapters
 
 - `GitHubAdapter` — Read from GitHub Issues/Projects.
-- `HarnessBacklogAdapter` — Read dispatchable stories and accepted backlog
-  items from `harness.db` via `harness-cli query`.
 
-These are NOT specified in v1 but the adapter interface MUST be designed to
-accommodate them.
+The adapter interface MUST be designed to accommodate future sources.
 
-### 7.4 Error Handling
+### 7.5 Error Handling
 
 - Candidate fetch failure → skip dispatch for this tick.
 - State refresh failure → keep running agents, retry next tick.
@@ -772,7 +860,366 @@ posture. Runs MUST NOT stall indefinitely on approval or input requests.
 - `codex.turn_timeout_ms` — per-turn timeout.
 - `codex.stall_timeout_ms` — enforced by orchestrator on event inactivity.
 
-## 12. Observability
+## 12. Execution Walkthrough
+
+This section traces a concrete end-to-end example: a story in `harness.db`
+gets picked up by Symphony, dispatched to Codex app-server, worked on, and
+completed. It also explains what Codex app-server is and how it differs from
+the Codex CLI you would use manually.
+
+### 12.1 Codex CLI vs Codex app-server
+
+These are two interfaces to the **same Codex agent brain**. The difference is
+who controls it.
+
+**Codex CLI** — interactive terminal tool, human-driven:
+
+```bash
+# You, the human, type this in your terminal:
+$ codex "Fix the authentication bug in auth.rs"
+
+# Codex runs interactively:
+#   - You see its output in your terminal
+#   - You may approve/reject file writes
+#   - It finishes, you read the result
+#   - You manually decide what to work on next
+```
+
+**Codex app-server** — headless subprocess, program-driven:
+
+```bash
+# Symphony spawns this as a child process:
+$ codex app-server
+
+# Now Codex sits waiting for JSON-RPC messages over stdin.
+# No terminal UI. No human approving actions.
+# A program (Symphony) sends structured messages and reads events.
+```
+
+The relationship:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                     CODEX (the agent brain)                    │
+│                                                                │
+│  Same model, same reasoning, same tool use, same code edits   │
+│                                                                │
+│  ┌──────────────────┐          ┌───────────────────────────┐  │
+│  │   CLI interface   │          │   app-server interface     │  │
+│  │                   │          │                            │  │
+│  │  Human types      │          │  Program sends JSON-RPC    │  │
+│  │  prompt in        │          │  messages over stdin/stdout │  │
+│  │  terminal         │          │                            │  │
+│  │                   │          │  Program reads structured   │  │
+│  │  Human reads      │          │  events back               │  │
+│  │  output on        │          │                            │  │
+│  │  screen           │          │  No human in the loop —    │  │
+│  │                   │          │  approval policy is         │  │
+│  │  Human approves   │          │  "auto-edit" (configured    │  │
+│  │  or rejects       │          │   in WORKFLOW.md)           │  │
+│  └──────────────────┘          └───────────────────────────┘  │
+│                                                                │
+│  The agent does IDENTICAL work in both modes:                  │
+│  reads AGENTS.md, follows Harness, writes code, runs tests.   │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Key insight: **Symphony replaces the human operator, not the agent.** The agent
+does the same work either way — reads the same docs, runs the same CLI commands,
+follows the same Harness protocol. The only difference is who picks the task and
+types the prompt.
+
+### 12.2 Concrete Example: Story US-015, harness.db → Done
+
+#### Phase 0: Story Exists in harness.db
+
+Someone (human or a previous intake agent session) created the story:
+
+```bash
+$ harness-cli story add --id US-015 --title "Add password reset flow" --lane normal
+```
+
+This wrote:
+- A row in `harness.db`: `story(id=US-015, title="Add password reset flow", risk_lane=normal, status=planned)`
+- A story file: `docs/stories/US-015-add-password-reset.md` (with acceptance criteria, verification commands, etc.)
+
+#### Phase 1: Symphony Polls harness.db
+
+Symphony is running as a daemon:
+
+```bash
+$ harness-symphony start --workflow WORKFLOW.md
+```
+
+The `WORKFLOW.md` is configured with `source.kind: harness_backlog`. Every 30
+seconds (configurable), the poll tick fires. The `HarnessBacklogAdapter` queries:
+
+```sql
+SELECT id, title, risk_lane, status, created_at
+FROM story
+WHERE status IN ('planned', 'in_progress')
+ORDER BY created_at ASC
+```
+
+Result: `[{id: "US-015", title: "Add password reset flow", lane: "normal", status: "planned"}]`
+
+#### Phase 2: Dispatch Decision
+
+The orchestrator checks:
+
+```text
+1. Is US-015 already claimed?        → No
+2. Is a slot available? (v1: 1 slot) → Yes (nothing running)
+3. Does it pass eligibility rules?   → Yes (has id, title, state; not blocked)
+4. Intake routing?                   → "inline" (normal story, not new_spec/new_initiative)
+```
+
+Decision: **dispatch US-015 in inline mode.**
+
+The orchestrator updates its in-memory state:
+
+```text
+state.claimed = {"US-015"}
+state.running = {"US-015": {worker: ..., mode: "inline", started_at: now()}}
+```
+
+#### Phase 3: Prompt Construction
+
+Symphony reads the story file (`docs/stories/US-015-add-password-reset.md`) and
+renders the `WORKFLOW.md` prompt template:
+
+```text
+Template variables:
+  item.identifier = "US-015"
+  item.title = "Add password reset flow"
+  item.description = (contents of docs/stories/US-015-add-password-reset.md)
+  mode = "inline"
+  attempt = null  (first attempt)
+```
+
+Rendered prompt:
+
+```
+You are working on US-015: Add password reset flow.
+
+Follow AGENTS.md in this repository. It will direct you to the Harness
+operating docs for intake classification, context loading, and trace recording.
+
+## Work Item
+
+[full contents of docs/stories/US-015-add-password-reset.md]
+```
+
+#### Phase 4: Codex app-server Subprocess Launch
+
+Symphony spawns the app-server as a child process:
+
+```text
+Command:  bash -lc "codex app-server"
+Cwd:      /path/to/repository-harness
+Stdin:    piped (Symphony writes JSON-RPC messages here)
+Stdout:   piped (Symphony reads JSON-RPC events here)
+Stderr:   captured for diagnostics
+```
+
+The subprocess starts and waits for messages.
+
+#### Phase 5: Session Initialization (JSON-RPC over stdio)
+
+Symphony sends structured messages to the app-server. The exact message
+format follows the targeted Codex app-server protocol version (this spec
+does not hardcode protocol schemas — see Section 11). Conceptually:
+
+```text
+Symphony → app-server (stdin):
+  Initialize session
+    cwd: "/path/to/repository-harness"
+    approval_policy: "auto-edit"        ← from WORKFLOW.md codex config
+    sandbox: (from WORKFLOW.md)
+    
+Symphony → app-server (stdin):
+  Start turn
+    prompt: "You are working on US-015: Add password reset flow. ..."
+    
+app-server → Symphony (stdout):
+  { event: "session_started", thread_id: "thr_abc123" }
+```
+
+Symphony records: `session_id = "thr_abc123-turn_1"`
+
+#### Phase 6: Agent Executes (This Is Where the Real Work Happens)
+
+Inside the app-server, Codex is now running with the prompt. From here, **the
+agent behaves exactly as it would if you typed the prompt into Codex CLI.**
+Symphony has no involvement in what happens next — it just monitors events.
+
+The agent autonomously:
+
+```text
+1. Reads AGENTS.md
+   → Learns this is a Harness repo
+   → Directed to read docs/HARNESS.md, docs/FEATURE_INTAKE.md, etc.
+
+2. Reads docs/FEATURE_INTAKE.md
+   → Classifies: input_type = "spec_slice", risk_lane = "normal"
+   → Runs: harness-cli intake --type spec_slice \
+           --summary "Password reset flow" --lane normal
+
+3. Reads docs/CONTEXT_RULES.md
+   → Phase = implementation, lane = normal
+   → Loads: ARCHITECTURE.md, relevant product docs, story packet
+
+4. Does the actual work
+   → Reads the story acceptance criteria
+   → Writes code (controllers, views, tests)
+   → Runs existing test suite
+   → Creates git branch, commits changes
+
+5. Records trace
+   → Runs: harness-cli trace --story US-015 \
+           --summary "Implemented password reset with email flow" \
+           --outcome completed
+
+6. Runs verification
+   → Runs: harness-cli story verify US-015
+   → Verification command from story packet executes
+   → If passes: story status → "implemented"
+
+7. Records friction (if any)
+   → Runs: harness-cli backlog add --title "Auth docs unclear" \
+           --source friction
+```
+
+While this happens, the app-server streams events to Symphony:
+
+```text
+app-server → Symphony (stdout):
+  { event: "notification", message: "Reading AGENTS.md..." }
+  { event: "notification", message: "Running harness-cli intake..." }
+  { event: "notification", message: "Creating password reset controller..." }
+  { event: "notification", message: "Running test suite..." }
+  { event: "turn_completed", usage: { input: 15000, output: 9000, total: 24000 } }
+```
+
+Symphony updates its tracking: token counts, last event timestamp, etc.
+
+#### Phase 7: Turn Completion
+
+The app-server signals `turn_completed`. Symphony now decides:
+
+```text
+1. Was this a success?            → Yes (turn_completed, not turn_failed)
+2. Has the item gone terminal?    → Check: harness.db shows US-015 status = "implemented"
+3. More turns needed?             → No (work is done, status is terminal)
+```
+
+Symphony:
+- Stops the app-server subprocess
+- Runs `after_run` hook (e.g., `harness-cli audit || true`)
+- Releases the claim: `state.claimed.remove("US-015")`
+- Adds to completed: `state.completed.add("US-015")`
+- Frees the slot
+
+#### Phase 8: Next Poll Cycle
+
+30 seconds later, Symphony polls again:
+
+```sql
+SELECT ... FROM story WHERE status IN ('planned', 'in_progress')
+```
+
+US-015 no longer appears (it's `implemented`). If US-016 exists and is
+`planned`, the cycle repeats for that story.
+
+### 12.3 What Happens on Failure
+
+If the agent fails (turn_failed, timeout, subprocess crash):
+
+```text
+1. Symphony catches the failure event or detects stall
+2. Kills the app-server subprocess
+3. Queues a retry:
+     attempt = 1
+     delay = min(10000 * 2^0, max_retry_backoff_ms) = 10 seconds
+4. When retry timer fires:
+     - Re-checks: is US-015 still in an active status?
+     - If yes: re-dispatches with attempt=1 in the prompt template
+     - The retry prompt includes "This is continuation attempt 1.
+       Review previous work and continue."
+5. On second failure: delay = 20 seconds, attempt = 2
+6. Continues until max_retry_backoff_ms ceiling
+```
+
+### 12.4 Side-by-Side: Manual vs Symphony
+
+```
+┌───────────────────────────────────┬────────────────────────────────────┐
+│  TODAY (Codex CLI, manual)        │  WITH SYMPHONY (Codex app-server)  │
+├───────────────────────────────────┼────────────────────────────────────┤
+│                                   │                                    │
+│  1. Human looks at backlog        │  1. Symphony polls harness.db      │
+│     $ harness-cli query stories   │     (automatic, every 30s)         │
+│                                   │                                    │
+│  2. Human picks a story           │  2. Symphony picks next planned    │
+│     "I'll work on US-015"         │     story (priority + age sort)    │
+│                                   │                                    │
+│  3. Human reads story file        │  3. Symphony reads story file      │
+│     $ cat docs/stories/US-015-*   │     and injects into prompt        │
+│                                   │                                    │
+│  4. Human types in terminal:      │  4. Symphony sends via JSON-RPC:   │
+│     $ codex "Work on US-015..."   │     {prompt: "Work on US-015..."}  │
+│                                   │                                    │
+│  5. Human watches output          │  5. Symphony monitors events       │
+│     and may approve actions       │     (auto-edit, no human needed)   │
+│                                   │                                    │
+│  6. Codex does the work           │  6. Codex does the SAME work       │
+│     - reads AGENTS.md             │     - reads AGENTS.md              │
+│     - follows Harness             │     - follows Harness              │
+│     - writes code, tests          │     - writes code, tests           │
+│     - runs harness-cli            │     - runs harness-cli             │
+│                                   │                                    │
+│  7. Human checks result           │  7. Symphony reads turn_completed  │
+│     "Did it pass verify?"         │     Checks story status in db      │
+│                                   │                                    │
+│  8. If failed, human retries      │  8. If failed, Symphony retries    │
+│     "Try again..."                │     with exponential backoff       │
+│                                   │                                    │
+│  9. Human picks next story        │  9. Symphony picks next story      │
+│     (go back to step 1)           │     (automatic, next poll cycle)   │
+│                                   │                                    │
+│  ─── Human is the scheduler ───   │  ─── Symphony is the scheduler ── │
+│  ─── Codex is the worker    ───   │  ─── Codex is the SAME worker ─── │
+└───────────────────────────────────┴────────────────────────────────────┘
+```
+
+### 12.5 What Symphony Controls vs What the Agent Controls
+
+```
+┌─────────────────────────────┬──────────────────────────────────────┐
+│  SYMPHONY (the scheduler)   │  AGENT (Codex in the repo)           │
+├─────────────────────────────┼──────────────────────────────────────┤
+│                             │                                      │
+│  Which story to work on     │  How to classify the work (intake)   │
+│  When to start the agent    │  Which docs to read (context rules)  │
+│  The initial prompt         │  What code to write                  │
+│  When to retry              │  What tests to run                   │
+│  When to stop (timeout)     │  Whether to record a trace           │
+│  Subprocess lifecycle       │  Whether verification passed         │
+│  Token accounting           │  Whether to record friction          │
+│  Slot management            │  Git operations (branch, commit, PR) │
+│                             │  harness-cli invocations             │
+│                             │                                      │
+│  Knows: is the agent alive? │  Knows: is the work correct?         │
+│  Doesn't know: what the     │  Doesn't know: that Symphony exists  │
+│  agent is actually doing    │  (just follows AGENTS.md)            │
+└─────────────────────────────┴──────────────────────────────────────┘
+```
+
+The agent doesn't know or care that Symphony launched it. It just sees a
+prompt and a repo with Harness docs. It would behave identically if a human
+typed the same prompt into Codex CLI.
+
+## 13. Observability
 
 ### 12.1 Logging
 
@@ -808,9 +1255,9 @@ When `--port <N>` is provided:
 - `GET /api/v1/<identifier>` — item-specific debug details.
 - `POST /api/v1/refresh` — trigger immediate poll.
 
-## 13. Failure Model and Recovery
+## 14. Failure Model and Recovery
 
-### 13.1 Failure Classes
+### 14.1 Failure Classes
 
 1. `Workflow/Config` — Missing `WORKFLOW.md`, invalid YAML, missing source
    credentials.
@@ -819,14 +1266,14 @@ When `--port <N>` is provided:
 3. `Work Source` — API errors, auth failures, malformed payloads.
 4. `Observability` — Log sink failure (non-fatal).
 
-### 13.2 Recovery Behavior
+### 14.2 Recovery Behavior
 
 - Config failures → skip dispatch, keep service alive.
 - Agent failures → retry with exponential backoff.
 - Source failures → skip this tick, retry next.
 - Observability failures → do not crash orchestrator.
 
-### 13.3 Restart Recovery
+### 14.3 Restart Recovery
 
 State is in-memory. After restart:
 
@@ -834,32 +1281,32 @@ State is in-memory. After restart:
 - No running sessions assumed recoverable.
 - Recovery by: fresh polling + re-dispatch of eligible items.
 
-## 14. Security and Safety
+## 15. Security and Safety
 
-### 14.1 Trust Boundary
+### 15.1 Trust Boundary
 
 Implementation-defined [Symphony §15.1]. Each implementation MUST document
 whether it targets trusted or restrictive environments.
 
-### 14.2 Filesystem Safety
+### 15.2 Filesystem Safety
 
 - Agent cwd MUST be the repository root.
 - Repository path MUST be validated as a real directory before agent launch.
 
-### 14.3 Secret Handling
+### 15.3 Secret Handling
 
 - Support `$VAR` indirection in workflow config.
 - Do not log API tokens or secret values.
 
-### 14.4 Hook Safety
+### 15.4 Hook Safety
 
 - Hooks are trusted config from `WORKFLOW.md`.
 - Hooks run in the repo directory.
 - Hook timeouts are REQUIRED.
 
-## 15. Reference Algorithms
+## 16. Reference Algorithms
 
-### 15.1 Service Startup
+### 16.1 Service Startup
 
 ```text
 function start_service():
@@ -880,7 +1327,7 @@ function start_service():
   event_loop(state)
 ```
 
-### 15.2 Poll-and-Dispatch Tick
+### 16.2 Poll-and-Dispatch Tick
 
 ```text
 on_tick(state):
@@ -904,7 +1351,7 @@ on_tick(state):
   return state
 ```
 
-### 15.3 Dispatch One Item
+### 16.3 Dispatch One Item
 
 ```text
 function dispatch_item(item, state, attempt, mode):
@@ -924,7 +1371,7 @@ function dispatch_item(item, state, attempt, mode):
   return state
 ```
 
-### 15.4 Worker Attempt
+### 16.4 Worker Attempt
 
 ```text
 function run_agent(item, attempt, mode):
@@ -960,7 +1407,7 @@ function run_agent(item, attempt, mode):
   exit_normal()
 ```
 
-### 15.5 Worker Exit Handling
+### 16.5 Worker Exit Handling
 
 ```text
 on_worker_exit(item_id, reason, state):
@@ -976,9 +1423,9 @@ on_worker_exit(item_id, reason, state):
   return state
 ```
 
-## 16. Implementation Checklist
+## 17. Implementation Checklist
 
-### 16.1 REQUIRED for v1 Conformance
+### 17.1 REQUIRED for v1 Conformance
 
 - [ ] `harness-core` crate with shared types, db access, config parsing
 - [ ] `harness-symphony` crate as optional workspace member
@@ -987,6 +1434,7 @@ on_worker_exit(item_id, reason, state):
 - [ ] Dynamic `WORKFLOW.md` watch/reload
 - [ ] Work source adapter trait (`WorkSource`)
 - [ ] Linear adapter (candidate fetch + state refresh + terminal fetch)
+- [ ] Harness backlog adapter (read stories/backlog from `harness.db`)
 - [ ] Intake router (inline vs dedicated mode dispatch)
 - [ ] Polling orchestrator with single-authority state
 - [ ] Single-slot dispatch (one agent at a time)
@@ -998,29 +1446,28 @@ on_worker_exit(item_id, reason, state):
 - [ ] `before_run` and `after_run` hooks with timeout
 - [ ] `install-harness.sh --with-symphony` flag
 
-### 16.2 RECOMMENDED Extensions (v2+)
+### 17.2 RECOMMENDED Extensions (v2+)
 
 - [ ] Multi-agent concurrency with shared-state strategy
 - [ ] TUI dashboard (`--tui`)
 - [ ] HTTP API (`--port`)
 - [ ] GitHub Issues adapter
-- [ ] Harness backlog adapter (read stories/backlog from `harness.db`)
 - [ ] SSH worker extension for remote execution
 - [ ] Persistent retry queue across restarts
 
-### 16.3 Operational Validation
+### 17.3 Operational Validation
 
 - [ ] Run with valid Linear credentials end-to-end
 - [ ] Verify hook execution on target OS
 - [ ] Verify `WORKFLOW.md` reload applies without restart
 
-## 17. Interaction with Harness Lifecycle
+## 18. Interaction with Harness Lifecycle
 
 This section documents how the Harness protocol plays out inside a
 Symphony-launched agent session, for implementor reference. Symphony does NOT
 enforce any of these steps — the agent follows them autonomously.
 
-### 17.1 Inline Mode Session
+### 18.1 Inline Mode Session
 
 ```text
 Agent starts in repo with rendered prompt containing work item.
@@ -1035,7 +1482,7 @@ Agent starts in repo with rendered prompt containing work item.
   9. Agent exits.
 ```
 
-### 17.2 Dedicated Intake Mode Session
+### 18.2 Dedicated Intake Mode Session
 
 ```text
 Agent starts in repo with intake-mode prompt.
@@ -1053,7 +1500,7 @@ Agent starts in repo with intake-mode prompt.
 The scheduler picks up generated stories on the next cycle (if using a
 Harness backlog adapter) or the operator creates tracker tickets for them.
 
-### 17.3 Cross-Run Intelligence
+### 18.3 Cross-Run Intelligence
 
 After N agent runs, accumulated data in `harness.db` supports:
 
@@ -1065,7 +1512,7 @@ After N agent runs, accumulated data in `harness.db` supports:
 These can be run manually, via cron, or by a future intelligence service
 extension. Symphony does not run them automatically in v1.
 
-## Appendix A. Example WORKFLOW.md
+## Appendix A. Example WORKFLOW.md (Linear Source)
 
 ```yaml
 ---
@@ -1127,6 +1574,94 @@ from where you left off.
 {% endif %}
 ```
 
+## Appendix A2. Example WORKFLOW.md (Harness Backlog Source)
+
+This configuration uses `harness.db` as the work source instead of an external
+tracker. Stories and backlog items created via `harness-cli` are automatically
+dispatched to agents.
+
+```yaml
+---
+source:
+  kind: harness_backlog
+  active_statuses: ["planned", "in_progress"]
+  terminal_statuses: ["implemented", "verified", "cancelled"]
+  include_backlog: false
+  db_path: harness.db
+
+polling:
+  interval_ms: 30000
+
+agent:
+  max_turns: 20
+  max_retry_backoff_ms: 300000
+
+codex:
+  command: codex app-server
+  approval_policy: auto-edit
+  turn_timeout_ms: 3600000
+  stall_timeout_ms: 300000
+
+hooks:
+  before_run: |
+    git fetch origin
+    git checkout -B work/$ITEM_IDENTIFIER origin/main
+  after_run: |
+    harness-cli audit || true
+
+intake:
+  dedicated_types: ["new_spec", "new_initiative"]
+  default_mode: inline
+---
+You are working on {{ item.identifier }}: {{ item.title }}.
+
+Follow AGENTS.md in this repository. It will direct you to the Harness
+operating docs for intake classification, context loading, and trace recording.
+
+Your story packet is at: docs/stories/{{ item.identifier }}-*.md
+Read it before starting implementation.
+
+{% if mode == "intake" %}
+## Intake Mode
+
+This is a DEDICATED INTAKE session. Your job is to:
+1. Read docs/FEATURE_INTAKE.md and classify this input.
+2. Generate the appropriate work artifacts (stories, epics, product docs).
+3. Record the intake via harness-cli intake.
+4. Do NOT implement code — only decompose and plan.
+{% endif %}
+
+{% if item.description %}
+## Work Item
+
+{{ item.description }}
+{% endif %}
+
+{% if attempt %}
+This is continuation attempt {{ attempt }}. Review previous work and continue
+from where you left off.
+{% endif %}
+```
+
+Usage:
+
+```bash
+# 1. Create stories (human or intake agent)
+$ harness-cli story add --id US-015 --title "Add password reset flow" --lane normal
+$ harness-cli story add --id US-016 --title "Fix email validation" --lane tiny
+
+# 2. Start Symphony — it picks up planned stories automatically
+$ harness-symphony start --workflow WORKFLOW.md
+
+# 3. Symphony dispatches US-015, then US-016 when done
+# Each agent follows AGENTS.md, records traces, runs verification
+
+# 4. Check results
+$ harness-cli query stories    # see updated statuses
+$ harness-cli query traces     # see execution records
+$ harness-cli query friction   # see what agents struggled with
+```
+
 ## Appendix B. Glossary Additions
 
 - **Work Source** — Pluggable adapter that fetches dispatchable work items
@@ -1140,6 +1675,11 @@ from where you left off.
 - **Harness Protocol** — The set of behaviors an agent follows by reading
   Harness docs (AGENTS.md, FEATURE_INTAKE.md, CONTEXT_RULES.md, etc.).
   Not enforced by the orchestrator.
+- **Codex app-server** — Headless subprocess mode of Codex that accepts
+  JSON-RPC commands over stdio. Same agent brain as the Codex CLI, but
+  controlled programmatically by Symphony instead of by a human.
+- **Harness Backlog Adapter** — Work source adapter that reads dispatchable
+  stories and backlog items from `harness.db` instead of an external tracker.
 
 ## Appendix C. Migration from v1 Spec
 
