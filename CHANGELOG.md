@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-06-15 - PR #20
+
+- fix: add missing files to installer file lists (@NguyenQS504092s)
+- Merge commit: `e3a83390be59eafcf361afe61672db1a9ed0a440`
+- Harness CLI release: not required
+- Changed files:
+  - `scripts/install-harness.ps1`
+  - `scripts/install-harness.sh`
+
+## 2026-06-13 - PR #19
+
+- feat(cli): kind-aware inbound tool registry with presence scanning (@thanh-dong)
+- Merge commit: `04177b25a7f7e1c5acd24b71127db331c1b6602c`
+- Harness CLI release: `harness-cli-v0.1.10`
+- Changed files:
+  - `AGENTS.md`
+  - `README.md`
+  - `crates/harness-cli/src/application.rs`
+  - `crates/harness-cli/src/domain.rs`
+  - `crates/harness-cli/src/infrastructure.rs`
+  - `crates/harness-cli/src/interface.rs`
+  - `docs/TOOL_REGISTRY.md`
+  - `docs/stories/US-027-inbound-tool-registry.md`
+  - `scripts/install-harness.sh`
+  - `scripts/schema/005-tool-extensions.sql`
+
 ## 2026-06-09 - PR #13
 
 - docs(phase5): Phase 5 — Evolution Infrastructure scope (@hoangnb24)
