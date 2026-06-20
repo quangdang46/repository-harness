@@ -7,6 +7,9 @@ harness.db-shm
 target/
 dist/
 
+# JavaScript dependencies for local web UI packages.
+node_modules/
+
 # Downloaded Harness CLI binary for installed project instances.
 scripts/bin/harness-cli
 scripts/bin/harness-cli.exe
