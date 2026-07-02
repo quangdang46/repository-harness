@@ -1754,6 +1754,7 @@ impl HarnessRepository for SqliteHarnessRepository {
             })?;
         let id = required_string(header, "run_id")?;
 
+        self.migrate()?;
         let mut connection = self.open_existing()?;
         let already_applied = connection
             .query_row(
@@ -2825,6 +2826,54 @@ mod tests {
         let applied = connection
             .query_row(
                 "SELECT COUNT(*) FROM changeset_applied WHERE id='run_apply';",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(applied, 1);
+    }
+
+    #[test]
+    fn apply_changeset_migrates_existing_database_before_idempotency_check() {
+        let (temp_dir, repository) = isolated_test_repository();
+        let connection = repository.open_or_create().unwrap();
+        repository.apply_schema_v1(&connection).unwrap();
+        for file in [
+            "002-story-verify.sql",
+            "003-tool-registry.sql",
+            "004-intervention.sql",
+            "005-tool-extensions.sql",
+        ] {
+            let sql = fs::read_to_string(repository.schema_dir.join(file)).unwrap();
+            connection.execute_batch(&sql).unwrap();
+        }
+        assert_eq!(
+            SqliteHarnessRepository::schema_version(&connection).unwrap(),
+            5
+        );
+        drop(connection);
+
+        let changeset_path = temp_dir.path().join("fixture.changeset.jsonl");
+        fs::write(
+            &changeset_path,
+            r#"{"op":"changeset.header","version":1,"run_id":"run_migrated_apply","base_schema_version":6}
+{"op":"story.add","version":1,"id":"US-MIGRATED-APPLY","payload":{"title":"Migrated apply story","risk_lane":"normal","contract_doc":null,"verify_command":null,"notes":null}}
+"#,
+        )
+        .unwrap();
+
+        let result = repository.apply_changeset(&changeset_path).unwrap();
+
+        assert!(result.applied);
+        assert_eq!(result.operations, 1);
+        let connection = repository.open_existing().unwrap();
+        assert_eq!(
+            SqliteHarnessRepository::schema_version(&connection).unwrap(),
+            8
+        );
+        let applied = connection
+            .query_row(
+                "SELECT COUNT(*) FROM changeset_applied WHERE id='run_migrated_apply';",
                 [],
                 |row| row.get::<_, i64>(0),
             )
