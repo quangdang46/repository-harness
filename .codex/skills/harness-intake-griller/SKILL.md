@@ -1,17 +1,19 @@
 ---
 name: harness-intake-griller
-description: Use when a user has a rough product idea, feature request, bug-fix intent, Harness improvement, or Symphony-ready work candidate and wants to clarify intent before implementation. This skill grills intent, runs this repository's Harness feature-intake workflow, creates or updates product docs and story packets, and prepares runnable work for Symphony without starting execution unless explicitly requested.
+description: Use when a user has a rough product idea, feature request, bug-fix intent, Harness improvement, or Symphony-ready work candidate and wants to clarify intent before implementation. This skill grills intent one decision at a time until shared understanding is explicit, then runs this repository's Harness feature-intake workflow, creates or updates product docs and story packets, and prepares runnable work for Symphony without starting execution unless explicitly requested.
 ---
 
 # Harness Intake Griller
 
-Turn fuzzy intent into Harness-ready planning artifacts before any implementation or Symphony run starts.
+Turn fuzzy intent into shared understanding first, then Harness-ready planning artifacts before any implementation or Symphony run starts.
 
-Use this skill as the pre-run discussion gate for this repository. The output is not code by default; it is shared understanding, intake classification, docs, stories, validation expectations, and a clear handoff to Symphony.
+Use this skill as the pre-run discussion gate for this repository. The first output is clarity, not code and not Harness paperwork. Once the user confirms the intent is understood, the output becomes intake classification, docs, stories, validation expectations, and a clear handoff to Symphony.
 
 ## Operating Boundary
 
 Do not jump from user intent directly to implementation.
+
+Do not treat Harness artifact creation as a substitute for understanding the user's idea. The discussion is successful only when the user can see their intent reflected back clearly enough to correct or approve it.
 
 Do not start `harness-symphony run`, click a Web UI start control, call `POST /api/tasks/<story-id>/start`, or invoke a long-running agent execution unless the user explicitly asks to execute after the intake artifacts are ready.
 
@@ -45,7 +47,9 @@ If the capability is inactive or absent, skip cleanly and note the gap in the fi
 
 ## Interview Loop
 
-Ask exactly one question at a time when the answer is not discoverable from local files or prior conversation.
+Ask exactly one question at a time when the answer is not discoverable from local files or prior conversation. Asking multiple questions at once is bewildering.
+
+Walk down the design tree one branch at a time. Resolve dependencies between decisions before asking about downstream details. If a question can be answered by exploring the codebase or Harness docs, explore first instead of asking.
 
 For each question:
 
@@ -54,11 +58,29 @@ For each question:
 - include a recommended answer
 - explain why that recommendation is probably right
 
-Prefer three sharp questions over a long questionnaire. Stop interviewing once the work is safe to classify and document.
+Prefer a few sharp questions over a long questionnaire, but do not stop merely because the work is safe to classify. Stop interviewing only when shared understanding is explicit enough to create accurate Harness artifacts, or when the user tells you to proceed with known uncertainty.
+
+## Shared Understanding Gate
+
+Before durable intake, story packets, product docs, or Symphony handoff, reach a checkpoint with the user.
+
+The checkpoint must make these fields clear enough that the user can correct them:
+
+1. Problem: what pain or opportunity is being addressed.
+2. Desired outcome: what should be true when the work succeeds.
+3. Audience or operator: who benefits or uses the result.
+4. Current behavior: what happens today.
+5. Target behavior: what changes from today.
+6. Non-goals: what should not be changed.
+7. Constraints: product, technical, timing, UX, data, or workflow limits.
+8. Decision chain: the important choices already made and what each choice unlocks.
+9. Remaining uncertainty: what is still unknown and whether it blocks planning.
+
+When the checkpoint is ready, present it concisely and ask for confirmation or correction. Do not proceed to artifacts until the user confirms, or until the user explicitly asks to continue despite unresolved uncertainty.
 
 ## Intake Gate
 
-Do not create story packets until these fields are clear enough:
+After the shared understanding gate, do not create story packets until these Harness fields are clear enough:
 
 1. Outcome: what should be true for the user.
 2. User-visible behavior or operational behavior: what changes from today.
@@ -74,29 +96,35 @@ If any field is weak, ask the next highest-leverage question.
 
 1. **Clarify intent**
    - Convert the user request into a concise intent brief.
+   - Grill one decision at a time until the idea is clear in the user's terms.
    - Capture goals, non-goals, assumptions, open questions, affected surfaces, and likely risks.
 
-2. **Record intake**
+2. **Confirm shared understanding**
+   - Present the checkpoint from the shared understanding gate.
+   - Ask for confirmation or correction before creating Harness artifacts.
+   - Keep interviewing if the user corrects a material part of the checkpoint.
+
+3. **Record intake**
    - Classify the request using `docs/FEATURE_INTAKE.md`.
    - Record the durable intake row with `scripts/bin/harness-cli intake`.
    - Use `harness_improvement` when the work changes how humans and agents collaborate.
 
-3. **Map docs and stories**
+4. **Map docs and stories**
    - Identify existing product docs and story packets that already cover the request.
    - Update existing artifacts when they are the real source of truth.
    - Create new product docs, initiative notes, story packets, hierarchy, or dependency records only when the request needs them.
 
-4. **Shape validation**
+5. **Shape validation**
    - Define cheap checks for planning changes.
    - Define final proof for the eventual implementation.
    - Keep proof concrete enough for `scripts/bin/harness-cli story verify <id>` when possible.
 
-5. **Prepare Symphony handoff**
+6. **Prepare Symphony handoff**
    - Mark or create story records with correct lane, status, and verify command.
    - Ensure dependencies and hierarchy are visible to the board when relevant.
    - State which story is ready for Symphony and what should remain manual review.
 
-6. **Stop before execution**
+7. **Stop before execution**
    - Summarize the intake result.
    - List created or updated artifacts.
    - Provide the exact Symphony command or Web UI action only as a next step unless the user explicitly asked to start execution.
@@ -106,12 +134,13 @@ If any field is weak, ask the next highest-leverage question.
 For tiny work:
 
 - record intake
-- patch directly only if the user asked for implementation
+- patch directly only if the user asked for implementation after the intent is clear
 - keep docs current
 - run quick checks
 
 For normal work:
 
+- require a confirmed shared understanding checkpoint first
 - create or update one story packet from the repo template
 - update or reference relevant product docs
 - define validation expectations
@@ -119,6 +148,7 @@ For normal work:
 
 For high-risk work:
 
+- require a confirmed shared understanding checkpoint first
 - use the repo's high-risk story template
 - document design, validation, and pause points
 - ask for human confirmation before implementation if direction remains ambiguous
@@ -126,7 +156,26 @@ For high-risk work:
 
 ## Output Shape
 
-When the intake is complete, respond with:
+During the interview, do not use a long final template. Ask the next single question.
+
+At the shared understanding checkpoint, respond with:
+
+```text
+Current understanding:
+- Problem:
+- Outcome:
+- Current behavior:
+- Target behavior:
+- Non-goals:
+- Constraints:
+- Key decisions:
+- Remaining uncertainty:
+
+Question:
+- Is this right, or what should change?
+```
+
+When the intake is complete after confirmation, respond with:
 
 ```text
 Intent brief:
