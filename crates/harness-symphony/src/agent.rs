@@ -455,6 +455,7 @@ mod tests {
     use super::*;
     use crate::config::ResolvedConfig;
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
@@ -535,6 +536,7 @@ mod tests {
         assert!(prompt.contains("\"result\":\"pass\""));
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_adapter_completes_json_rpc_handshake() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -570,6 +572,7 @@ printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"
         run_codex_agent(&config, &prepared).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_adapter_does_not_use_agent_timeout_as_wall_clock_deadline() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -608,6 +611,7 @@ printf '%s\n' '{"id":4,"result":{"data":[{"id":"turn_1","items":[],"itemsView":"
         run_codex_agent(&config, &prepared).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_adapter_reports_failed_terminal_turn() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -642,6 +646,7 @@ printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"
         assert!(error.to_string().contains("turn status was failed: boom"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_adapter_recovers_completed_turn_from_state_query() {
         let temp_dir = tempfile::tempdir().unwrap();
