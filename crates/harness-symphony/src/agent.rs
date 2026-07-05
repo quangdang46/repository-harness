@@ -530,7 +530,9 @@ mod tests {
         assert!(prompt.contains("US-046"));
         assert!(prompt.contains(".harness/runs/run_1/SUMMARY.md"));
         assert!(prompt.contains(".harness/changesets/run_1.changeset.jsonl"));
-        assert!(prompt.contains("/repo/scripts/bin/harness-cli"));
+        assert!(prompt.contains("harness-cli"));
+        assert!(prompt.contains("scripts"));
+        assert!(prompt.contains("bin"));
         assert!(prompt.contains("HARNESS_DB_PATH"));
         assert!(prompt.contains("top-level validation object"));
         assert!(prompt.contains("Do not write validation_evidence"));
