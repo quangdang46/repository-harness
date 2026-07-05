@@ -2021,6 +2021,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pr_retry_endpoint_reuses_pr_creation_and_updates_review_state() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let temp_dir = tempfile::tempdir().unwrap();
@@ -2186,6 +2187,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn sync_request_applies_only_requested_run_changeset() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = test_config(&temp_dir);

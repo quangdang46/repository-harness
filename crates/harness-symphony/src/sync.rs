@@ -257,6 +257,7 @@ mod tests {
         assert!(!has_changeset);
     }
 
+    #[cfg(unix)]
     #[test]
     fn already_applied_changeset_marks_run_synced() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -369,6 +370,7 @@ mod tests {
         assert_eq!(run.next_action, "done");
     }
 
+    #[cfg(unix)]
     #[test]
     fn sync_changeset_applies_only_requested_run() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -407,6 +409,7 @@ mod tests {
         assert!(!args.contains("run_two.changeset.jsonl"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn refresh_checkout_fast_forwards_from_upstream() {
         let temp_dir = tempfile::tempdir().unwrap();
