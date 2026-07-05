@@ -42,7 +42,8 @@
 .EXAMPLE
     irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/install.ps1" | iex
     # with args:
-    & ([scriptblock]::Create((irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/install.ps1"))) -Dest "C:\tools" -EasyMode -Verify
+    irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/install.ps1" -OutFile install.ps1
+    .\install.ps1 -Dest "C:\tools" -EasyMode -Verify
 #>
 
 param(

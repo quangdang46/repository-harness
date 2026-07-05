@@ -71,7 +71,7 @@ curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/mai
 On Windows PowerShell, run:
 
 ```powershell
-& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1"))) -Yes
+irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" | iex
 ```
 
 If the target already has `AGENTS.md`, `docs/`, or `scripts/`, choose one:
@@ -86,10 +86,12 @@ curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/mai
 
 ```powershell
 # Update an existing Harness repo without moving existing files
-& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1"))) -Merge -Yes
+irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1
+.\install.ps1 -Merge
 
 # Back up and replace AGENTS.md, docs/, and scripts/
-& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1"))) -Override -Yes
+irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1
+.\install.ps1 -Override
 ```
 
 Use `--merge` when a project already has Harness and you want to append newly
@@ -127,7 +129,8 @@ curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/mai
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1"))) -Directory C:\path\to\project -Yes
+irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1
+.\install.ps1 -Directory "C:\path\to\project"
 ```
 
 Use `--dry-run` on Bash or `-DryRun` on PowerShell to preview changes before

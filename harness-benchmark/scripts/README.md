@@ -101,7 +101,7 @@ curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/mai
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1"))) -Yes
+irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" | iex
 ```
 
 ```bash
@@ -109,7 +109,8 @@ curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/mai
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1"))) -Merge -Yes
+irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1
+.\install.ps1 -Merge
 ```
 
 ```bash
@@ -117,7 +118,8 @@ curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/mai
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1"))) -Merge -RefreshAgentShim -Yes
+irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1
+.\install.ps1 -Merge -RefreshAgentShim
 ```
 
 `--refresh-agent-shim` backs up `AGENTS.md` before changing it. If the existing
