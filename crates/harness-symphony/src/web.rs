@@ -1421,6 +1421,7 @@ mod tests {
     use std::process::Command;
     use std::sync::Mutex;
 
+    #[cfg(unix)]
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn test_config(temp_dir: &tempfile::TempDir) -> ResolvedConfig {
