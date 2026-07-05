@@ -1,6 +1,6 @@
 # Harness Benchmark
 
-A controlled benchmark for measuring the effectiveness of [harness-experimental](https://github.com/hoangnb24/harness-experimental) across development phases.
+A controlled benchmark for measuring the effectiveness of [harness-experimental](https://github.com/quangdang46/harness-experimental) across development phases.
 
 ## What This Is
 

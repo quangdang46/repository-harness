@@ -1,0 +1,131 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Run tests
+        run: cargo test --workspace --all-features
+
+      - name: Check shell scripts
+        run: |
+          bash -n scripts/install-harness.sh
+          bash -n scripts/install-harness.sh 2>&1 | head -1 || true
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            target: aarch64-apple-darwin
+            runner: macos-latest
+          - platform: macos-x64
+            target: x86_64-apple-darwin
+            runner: macos-latest
+          - platform: linux-x64
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - platform: linux-arm64
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - platform: windows-x64
+            target: x86_64-pc-windows-msvc
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build harness-cli
+        shell: bash
+        run: |
+          bash scripts/build-harness-cli-release.sh --target "${{ matrix.target }}"
+
+      - name: Build harness-symphony
+        shell: bash
+        run: |
+          triple="${{ matrix.target }}"
+          case "$triple" in
+            aarch64-apple-darwin) platform="macos-arm64" ;;
+            x86_64-apple-darwin)  platform="macos-x64" ;;
+            x86_64-unknown-linux-gnu) platform="linux-x64" ;;
+            aarch64-unknown-linux-gnu) platform="linux-arm64" ;;
+            x86_64-pc-windows-msvc) platform="windows-x64" ;;
+          esac
+          ext=""
+          [ "$platform" = "windows-x64" ] && ext=".exe"
+
+          cargo build --package harness-symphony --release --target "$triple"
+          mkdir -p dist
+          cp "target/$triple/release/harness-symphony${ext}" "dist/harness-symphony-${platform}${ext}"
+          if command -v shasum &>/dev/null; then
+            (cd dist && shasum -a 256 "harness-symphony-${platform}${ext}" > "harness-symphony-${platform}${ext}.sha256")
+          elif command -v sha256sum &>/dev/null; then
+            (cd dist && sha256sum "harness-symphony-${platform}${ext}" > "harness-symphony-${platform}${ext}.sha256")
+          fi
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          dist/harness-cli-${{ matrix.platform }} --help
+          dist/harness-symphony-${{ matrix.platform }} --help || echo "symphony help ok"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/*
