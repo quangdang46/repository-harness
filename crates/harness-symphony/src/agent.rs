@@ -454,6 +454,7 @@ fn read_child_stderr(stderr: std::process::ChildStderr) -> Result<String, AgentE
 mod tests {
     use super::*;
     use crate::config::ResolvedConfig;
+    #[cfg(unix)]
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
