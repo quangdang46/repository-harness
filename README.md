@@ -71,6 +71,7 @@ curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/mai
 On Windows PowerShell, run:
 
 ```powershell
+# Default install (no flag needed)
 irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" | iex
 ```
 
@@ -85,13 +86,11 @@ curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/mai
 ```
 
 ```powershell
-# Update an existing Harness repo without moving existing files
-irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1
-.\install.ps1 -Merge
+# Update an existing Harness repo (auto-cleanup after install)
+irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1; .\install.ps1 -Merge; Remove-Item install.ps1
 
 # Back up and replace AGENTS.md, docs/, and scripts/
-irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1
-.\install.ps1 -Override
+irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1; .\install.ps1 -Override; Remove-Item install.ps1
 ```
 
 Use `--merge` when a project already has Harness and you want to append newly
@@ -129,8 +128,7 @@ curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/mai
 ```
 
 ```powershell
-irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1
-.\install.ps1 -Directory "C:\path\to\project"
+irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1; .\install.ps1 -Directory "C:\path\to\project"; Remove-Item install.ps1
 ```
 
 Use `--dry-run` on Bash or `-DryRun` on PowerShell to preview changes before

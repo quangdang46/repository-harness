@@ -125,8 +125,7 @@ curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/mai
 ```
 
 ```powershell
-irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1
-.\install.ps1 -Merge
+irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1; .\install.ps1 -Merge; Remove-Item install.ps1
 ```
 
 ```bash
@@ -134,8 +133,7 @@ curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/mai
 ```
 
 ```powershell
-irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1
-.\install.ps1 -Merge -RefreshAgentShim
+irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1; .\install.ps1 -Merge -RefreshAgentShim; Remove-Item install.ps1
 ```
 
 `--refresh-agent-shim` backs up `AGENTS.md` before changing it. If the existing
