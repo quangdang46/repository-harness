@@ -647,6 +647,7 @@ mod tests {
     }
 
     #[cfg(not(unix))]
+    #[allow(dead_code)]
     fn make_executable(_path: &Path) {
         // On Windows, shell scripts are not executable; the tests that
         // use this function are gated with `#[cfg(unix)]`.

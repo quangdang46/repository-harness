@@ -1419,6 +1419,7 @@ mod tests {
     use rusqlite::{params, Connection};
     use std::fs;
     use std::process::Command;
+    #[cfg(unix)]
     use std::sync::Mutex;
 
     #[cfg(unix)]
@@ -1570,6 +1571,7 @@ mod tests {
     }
 
     #[cfg(not(unix))]
+    #[allow(dead_code)]
     fn make_executable(_path: &std::path::Path) {}
 
     #[test]
