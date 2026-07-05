@@ -545,7 +545,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let worktree = temp_dir.path().join("worktree");
         fs::create_dir_all(&worktree).unwrap();
-        let fake_server = temp_dir.path().join("fake-codex-app-server");
+        let fake_server = temp_dir.path().join("fake-codex-hs-a");
         fs::write(
             &fake_server,
             r#"#!/usr/bin/env sh
@@ -581,7 +581,7 @@ printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"
         let temp_dir = tempfile::tempdir().unwrap();
         let worktree = temp_dir.path().join("worktree");
         fs::create_dir_all(&worktree).unwrap();
-        let fake_server = temp_dir.path().join("fake-codex-app-server");
+        let fake_server = temp_dir.path().join("fake-codex-hs-b");
         fs::write(
             &fake_server,
             r#"#!/usr/bin/env sh
@@ -620,7 +620,7 @@ printf '%s\n' '{"id":4,"result":{"data":[{"id":"turn_1","items":[],"itemsView":"
         let temp_dir = tempfile::tempdir().unwrap();
         let worktree = temp_dir.path().join("worktree");
         fs::create_dir_all(&worktree).unwrap();
-        let fake_server = temp_dir.path().join("fake-codex-app-server");
+        let fake_server = temp_dir.path().join("fake-codex-hs-c");
         fs::write(
             &fake_server,
             r#"#!/usr/bin/env sh
@@ -655,7 +655,7 @@ printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"
         let temp_dir = tempfile::tempdir().unwrap();
         let worktree = temp_dir.path().join("worktree");
         fs::create_dir_all(&worktree).unwrap();
-        let fake_server = temp_dir.path().join("fake-codex-app-server");
+        let fake_server = temp_dir.path().join("fake-codex-hs-d");
         fs::write(
             &fake_server,
             r#"#!/usr/bin/env sh
