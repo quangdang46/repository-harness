@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-07-07 - PR #37
+
+- US-070: completed (@hoangnb24)
+- Merge commit: `ac748021b7a46b71ff7cde187f68073098b1a3b8`
+- Harness CLI release: not required
+- Changed files:
+  - `.harness/changesets/run_1783405248236036000_24617_0.changeset.jsonl`
+  - `crates/harness-symphony/web-ui/src/features/symphony/board.tsx`
+  - `crates/harness-symphony/web-ui/tests/board.spec.ts`
+  - `docs/stories/epics/E08-symphony-web-ui-controller/US-070-readable-done-column-task-cards.md`
+
 ## 2026-07-05 - PR #36
 
 - US-068: completed (@hoangnb24)
