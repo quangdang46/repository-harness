@@ -2,7 +2,7 @@
 
 ## Status
 
-planned
+implemented
 
 ## Lane
 
@@ -118,4 +118,16 @@ from proposal memory toward measurable H5 improvement.
 
 ## Evidence
 
-Add exact outcome and health-query proof after implementation.
+- Added typed `backlog outcome record` and read-only `query improvement-health`
+  CLI surfaces with append-only semantic changeset replay.
+- Focused `improvement_health` tests cover typed parsing, open-work refusal,
+  confirmed/ineffective/reverted ordinal history, replay, current-state
+  ordering, manual/date/trace-count schedules, baseline errors, preserved
+  `legacy_recorded` outcome display, and byte-for-byte read-only queries.
+- `cargo test --workspace` passed 158 tests.
+- `cargo clippy --workspace -- -D warnings` and `cargo fmt --check` passed.
+- The planned story verification passed and changeset rebuild restored 54
+  Symphony story rows.
+- A local release binary was checksum-verified by the installer; the fresh
+  installed database initialized at schema 10 and returned improvement health
+  with entropy 0 and no actionable drift.

@@ -13,12 +13,12 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 use crate::application::{
-    BacklogAddInput, BacklogCloseInput, BrownfieldImportResult, ChangesetApplyResult,
-    DbRebuildResult, DecisionAddInput, DecisionVerifyResult, HarnessContext, InitResult,
-    IntakeInput, InterventionAddInput, InterventionFilter, MigrateResult, QueryTable,
-    StoryAddInput, StoryBacklogLinkInput, StoryBacklogLinkRecord, StoryCompleteResult,
-    StoryDependencyInput, StoryDependencyRecord, StoryUpdateInput, StoryVerifyResult,
-    ToolRegisterInput, TraceInput,
+    BacklogAddInput, BacklogCloseInput, BacklogOutcomeInput, BrownfieldImportResult,
+    ChangesetApplyResult, DbRebuildResult, DecisionAddInput, DecisionVerifyResult, HarnessContext,
+    ImprovementHealthItem, ImprovementHealthResult, InitResult, IntakeInput, InterventionAddInput,
+    InterventionFilter, MigrateResult, OutcomeObservationRecord, QueryTable, StoryAddInput,
+    StoryBacklogLinkInput, StoryBacklogLinkRecord, StoryCompleteResult, StoryDependencyInput,
+    StoryDependencyRecord, StoryUpdateInput, StoryVerifyResult, ToolRegisterInput, TraceInput,
 };
 use crate::domain::{
     compiled_tool_registry, normalize_token, proposal_key, score_context, score_trace, sha256_hex,
@@ -79,6 +79,10 @@ pub enum HarnessInfraError {
     BacklogNotFound(i64),
     #[error("backlog close: keyed lifecycle occurrence '{0}' must be completed through story complete or rejected through propose --reject")]
     KeyedBacklogClose(i64),
+    #[error("backlog outcome record: backlog item '{0}' must be an implemented keyed occurrence")]
+    BacklogOutcomeNotImplemented(i64),
+    #[error("backlog outcome record: status must be confirmed, ineffective, or reverted")]
+    BacklogOutcomeStatus,
     #[error("proposal decision: {0}")]
     ProposalDecision(String),
     #[error("trace '{0}' not found")]
@@ -138,6 +142,10 @@ pub trait HarnessRepository {
     fn verify_decision(&self, id: &str) -> Result<DecisionVerifyResult>;
     fn add_backlog(&self, input: BacklogAddInput) -> Result<i64>;
     fn close_backlog(&self, input: BacklogCloseInput) -> Result<()>;
+    fn record_backlog_outcome(
+        &self,
+        input: BacklogOutcomeInput,
+    ) -> Result<OutcomeObservationRecord>;
     fn register_tool(&self, input: ToolRegisterInput) -> Result<()>;
     fn remove_tool(&self, name: &str) -> Result<()>;
     fn check_tools(&self, name: Option<String>) -> Result<Vec<ToolCheckResult>>;
@@ -159,6 +167,7 @@ pub trait HarnessRepository {
     ) -> Result<Vec<ToolEntry>>;
     fn query_interventions(&self, filter: InterventionFilter) -> Result<Vec<InterventionRecord>>;
     fn query_stats(&self) -> Result<HarnessStats>;
+    fn query_improvement_health(&self) -> Result<ImprovementHealthResult>;
     fn audit(&self) -> Result<AuditResult>;
     fn audit_record_evidence(&self) -> Result<AuditResult>;
     fn propose(&self, decision: ProposalDecision) -> Result<ProposalResult>;
@@ -1587,6 +1596,82 @@ impl HarnessRepository for SqliteHarnessRepository {
         })
     }
 
+    fn record_backlog_outcome(
+        &self,
+        input: BacklogOutcomeInput,
+    ) -> Result<OutcomeObservationRecord> {
+        if !matches!(
+            input.status.as_str(),
+            "confirmed" | "ineffective" | "reverted"
+        ) {
+            return Err(HarnessInfraError::BacklogOutcomeStatus);
+        }
+        if input.outcome.trim().is_empty() {
+            return Err(HarnessInfraError::ProposalDecision(
+                "outcome observation text must not be empty".to_owned(),
+            ));
+        }
+
+        let mut connection = self.open_existing()?;
+        self.with_logged_write(&mut connection, |transaction| {
+            let occurrence: Option<(Option<String>, Option<String>, String)> = transaction
+                .query_row(
+                    "SELECT uid, proposal_key, status FROM backlog WHERE id=?1;",
+                    params![input.id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let Some((Some(backlog_uid), Some(_), status)) = occurrence else {
+                return Err(HarnessInfraError::BacklogOutcomeNotImplemented(input.id));
+            };
+            if status != "implemented" {
+                return Err(HarnessInfraError::BacklogOutcomeNotImplemented(input.id));
+            }
+
+            let ordinal: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM backlog_outcome_observation WHERE backlog_uid=?1;",
+                params![backlog_uid],
+                |row| row.get(0),
+            )?;
+            let uid = Self::new_uid("obs", &format!("{}\0{}", backlog_uid, ordinal));
+            transaction.execute(
+                "INSERT INTO backlog_outcome_observation
+                    (uid, backlog_uid, ordinal, status, outcome, evidence, observed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'));",
+                params![uid, backlog_uid, ordinal, input.status, input.outcome, input.evidence],
+            )?;
+            let observed_at: String = transaction.query_row(
+                "SELECT observed_at FROM backlog_outcome_observation WHERE uid=?1;",
+                params![uid],
+                |row| row.get(0),
+            )?;
+            let record = OutcomeObservationRecord {
+                backlog_id: input.id,
+                ordinal,
+                status: input.status.clone(),
+                outcome: input.outcome.clone(),
+                evidence: input.evidence.clone(),
+                observed_at: observed_at.clone(),
+            };
+            Ok((
+                record,
+                vec![json!({
+                    "op": "backlog.outcome.observe",
+                    "version": 1,
+                    "uid": uid,
+                    "payload": {
+                        "backlog_uid": backlog_uid,
+                        "ordinal": ordinal,
+                        "status": input.status,
+                        "outcome": input.outcome,
+                        "evidence": input.evidence,
+                        "observed_at": observed_at,
+                    }
+                })],
+            ))
+        })
+    }
+
     fn register_tool(&self, input: ToolRegisterInput) -> Result<()> {
         validate_tool_description(&input.description)?;
         // Only exec-probed kinds are PATH-checked at register time. mcp/skill/http
@@ -2196,6 +2281,269 @@ impl HarnessRepository for SqliteHarnessRepository {
             .map_err(HarnessInfraError::from)
     }
 
+    fn query_improvement_health(&self) -> Result<ImprovementHealthResult> {
+        let audit = self.audit()?;
+        let proposals = self.propose(ProposalDecision::PreviewSuppressed)?.proposals;
+        let connection = self.open_existing()?;
+        let actionable_drift = audit.orphaned_stories.len()
+            + audit.unverified_stories.len()
+            + audit.unverified_decisions.len()
+            + audit.backlog_without_outcomes.len()
+            + audit.stale_stories.len()
+            + audit.broken_tools.len();
+        let mut items = Vec::new();
+
+        if actionable_drift > 0 {
+            items.push(ImprovementHealthItem {
+                category: "audit".to_owned(),
+                id: "entropy".to_owned(),
+                title: format!("{actionable_drift} actionable audit finding(s)"),
+                state: "drift".to_owned(),
+                schedule: "now".to_owned(),
+                outcome: String::new(),
+                evidence: String::new(),
+                next_action: "harness-cli audit".to_owned(),
+            });
+        }
+
+        for proposal in proposals {
+            let category = match proposal.lifecycle_state.as_str() {
+                "new" | "pending" | "legacy-unclassified" => "proposal_decision",
+                "regression" | "reconsideration" => "recurrence",
+                _ => continue,
+            };
+            let next_action = match proposal.lifecycle_state.as_str() {
+                "legacy-unclassified" => {
+                    "reconcile legacy identity before accepting or rejecting".to_owned()
+                }
+                _ => format!(
+                    "harness-cli propose --accept {} <schedule> OR --reject {} --reason <reason>",
+                    proposal.key, proposal.key
+                ),
+            };
+            items.push(ImprovementHealthItem {
+                category: category.to_owned(),
+                id: proposal.key,
+                title: proposal.title,
+                state: proposal.lifecycle_state,
+                schedule: "decision_pending".to_owned(),
+                outcome: String::new(),
+                evidence: proposal.evidence,
+                next_action,
+            });
+        }
+
+        let persisted_pending: Vec<(i64, String, String)> = {
+            let mut statement = connection.prepare(
+                "SELECT id, proposal_key, title FROM backlog
+                 WHERE proposal_key IS NOT NULL AND status='proposed'
+                 ORDER BY id;",
+            )?;
+            let rows =
+                statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            collect_rows(rows)?
+        };
+        for (id, key, title) in persisted_pending {
+            if items.iter().any(|item| item.id == key) {
+                continue;
+            }
+            items.push(ImprovementHealthItem {
+                category: "proposal_decision".to_owned(),
+                id: key.clone(),
+                title,
+                state: "pending".to_owned(),
+                schedule: "decision_pending".to_owned(),
+                outcome: String::new(),
+                evidence: format!("persisted backlog #{id}"),
+                next_action: format!(
+                    "harness-cli propose --accept {key} <schedule> OR --reject {key} --reason <reason>"
+                ),
+            });
+        }
+
+        #[allow(clippy::type_complexity)]
+        let lifecycle_rows: Vec<(
+            i64,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        )> = {
+            let mut statement = connection.prepare(
+                "SELECT backlog.id, backlog.title, backlog.status, backlog.uid,
+                        backlog.outcome_schedule_kind, backlog.outcome_due_at,
+                        backlog.outcome_after_traces, backlog.outcome_baseline_trace_count,
+                        observation.status, observation.ordinal,
+                        observation.outcome, observation.evidence
+                 FROM backlog
+                 LEFT JOIN backlog_outcome_observation AS observation
+                   ON observation.backlog_uid=backlog.uid
+                  AND observation.ordinal=(SELECT MAX(latest.ordinal)
+                                           FROM backlog_outcome_observation AS latest
+                                           WHERE latest.backlog_uid=backlog.uid)
+                 WHERE backlog.proposal_key IS NOT NULL
+                   AND backlog.status IN ('accepted','implemented')
+                 ORDER BY backlog.id;",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                ))
+            })?;
+            collect_rows(rows)?
+        };
+        let current_trace_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM trace WHERE uid IS NOT NULL;",
+            [],
+            |row| row.get(0),
+        )?;
+
+        for (
+            id,
+            title,
+            backlog_status,
+            _uid,
+            schedule_kind,
+            due_at,
+            after_traces,
+            baseline,
+            observation_status,
+            ordinal,
+            observation_outcome,
+            observation_evidence,
+        ) in lifecycle_rows
+        {
+            if backlog_status == "accepted" {
+                items.push(ImprovementHealthItem {
+                    category: "accepted_work".to_owned(),
+                    id: id.to_string(),
+                    title,
+                    state: "in_progress".to_owned(),
+                    schedule: schedule_kind
+                        .unwrap_or_else(|| "awaiting_observation_plan".to_owned()),
+                    outcome: String::new(),
+                    evidence: String::new(),
+                    next_action: "complete the designated resolver story with fresh proof"
+                        .to_owned(),
+                });
+                continue;
+            }
+
+            let (state, schedule, next_action) = if let Some(status) = observation_status {
+                let action = match status.as_str() {
+                    "confirmed" => {
+                        "continue monitoring; append a later observation if impact changes"
+                    }
+                    "ineffective" => {
+                        "review the ineffective change and decide the next proposal action"
+                    }
+                    "reverted" => "inspect recurrence evidence before accepting replacement work",
+                    "legacy_recorded" => {
+                        "preserved legacy evidence; append a modern observation when measured"
+                    }
+                    _ => "inspect outcome history",
+                };
+                (
+                    status,
+                    format!("observed_ordinal_{}", ordinal.unwrap_or_default()),
+                    action.to_owned(),
+                )
+            } else {
+                let outcome_command = format!(
+                    "harness-cli backlog outcome record --id {id} --status <confirmed|ineffective|reverted> --outcome <text>"
+                );
+                match schedule_kind.as_deref() {
+                    Some("manual") => (
+                        "pending_manual".to_owned(),
+                        "manual".to_owned(),
+                        outcome_command,
+                    ),
+                    Some("due_at") => {
+                        let due = due_at.unwrap_or_default();
+                        let reached: i64 = connection.query_row(
+                            "SELECT CASE WHEN datetime(?1) <= datetime('now') THEN 1 ELSE 0 END;",
+                            params![due],
+                            |row| row.get(0),
+                        )?;
+                        if reached == 1 {
+                            ("due".to_owned(), format!("due_at:{due}"), outcome_command)
+                        } else {
+                            (
+                                "scheduled_not_due".to_owned(),
+                                format!("due_at:{due}"),
+                                "wait until due, or record early if evidence is available"
+                                    .to_owned(),
+                            )
+                        }
+                    }
+                    Some("trace_count") => {
+                        let baseline = baseline.unwrap_or(0);
+                        let target = after_traces.unwrap_or(0);
+                        if current_trace_count < baseline {
+                            ("schedule_error".to_owned(), format!("trace_count:baseline={baseline},current={current_trace_count}"), "rebuild or repair the persisted trace baseline before judging due state".to_owned())
+                        } else {
+                            let observed = current_trace_count - baseline;
+                            if observed >= target {
+                                (
+                                    "due".to_owned(),
+                                    format!("trace_count:{observed}/{target}"),
+                                    outcome_command,
+                                )
+                            } else {
+                                ("scheduled_not_due".to_owned(), format!("trace_count:{observed}/{target};remaining={}", target - observed), "wait for the remaining stable traces, or record early if evidence is available".to_owned())
+                            }
+                        }
+                    }
+                    _ => (
+                        "awaiting_observation_plan".to_owned(),
+                        "legacy_null_schedule".to_owned(),
+                        "reconcile the missing observation plan; do not guess an overdue date"
+                            .to_owned(),
+                    ),
+                }
+            };
+            items.push(ImprovementHealthItem {
+                category: "outcome_review".to_owned(),
+                id: id.to_string(),
+                title,
+                state,
+                schedule,
+                outcome: observation_outcome.unwrap_or_default(),
+                evidence: observation_evidence.unwrap_or_default(),
+                next_action,
+            });
+        }
+
+        items.sort_by(|left, right| {
+            health_category_rank(&left.category)
+                .cmp(&health_category_rank(&right.category))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(ImprovementHealthResult {
+            entropy_score: audit.entropy_score(),
+            actionable_drift,
+            items,
+        })
+    }
+
     fn audit(&self) -> Result<AuditResult> {
         let connection = self.open_existing()?;
         let mut result = AuditResult {
@@ -2228,8 +2576,14 @@ impl HarnessRepository for SqliteHarnessRepository {
                 &connection,
                 "SELECT CAST(id AS TEXT), title FROM backlog
                  WHERE predicted_impact IS NOT NULL
-                   AND actual_outcome IS NULL
                    AND status='implemented'
+                   AND (
+                     (proposal_key IS NOT NULL AND NOT EXISTS (
+                       SELECT 1 FROM backlog_outcome_observation
+                       WHERE backlog_uid=backlog.uid
+                     ))
+                     OR (proposal_key IS NULL AND actual_outcome IS NULL)
+                   )
                  ORDER BY id;",
             )?,
             stale_stories: audit_findings(
@@ -3129,6 +3483,17 @@ fn audit_findings(connection: &Connection, sql: &str) -> Result<Vec<AuditFinding
     collect_rows(rows)
 }
 
+fn health_category_rank(category: &str) -> u8 {
+    match category {
+        "audit" => 0,
+        "proposal_decision" => 1,
+        "accepted_work" => 2,
+        "outcome_review" => 3,
+        "recurrence" => 4,
+        _ => 5,
+    }
+}
+
 #[derive(Debug)]
 struct ProposalEvidenceGroup {
     text: String,
@@ -3566,6 +3931,34 @@ fn apply_changeset_operation(
             transaction.execute(
                 "UPDATE backlog SET status='implemented', implemented_at=datetime('now'), closed_at=datetime('now'), resolution_evidence=COALESCE(resolution_evidence, ?1), outcome_baseline_trace_count=COALESCE(?2, outcome_baseline_trace_count) WHERE uid=?3;",
                 params![evidence, baseline, uid],
+            )?
+        }
+        "backlog.outcome.observe" => {
+            let uid = required_uid(operation, "uid", "obs")?;
+            let backlog_uid = required_uid(payload, "backlog_uid", "blg")?;
+            let status = required_string(payload, "status")?;
+            if !matches!(
+                status.as_str(),
+                "confirmed" | "ineffective" | "reverted" | "legacy_recorded"
+            ) {
+                return Err(HarnessInfraError::InvalidChangeset(
+                    "invalid backlog outcome observation status".to_owned(),
+                ));
+            }
+            transaction.execute(
+                "INSERT INTO backlog_outcome_observation
+                    (uid, backlog_uid, ordinal, status, outcome, evidence, observed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(uid) DO NOTHING;",
+                params![
+                    uid,
+                    backlog_uid,
+                    required_i64(payload, "ordinal")?,
+                    status,
+                    required_string(payload, "outcome")?,
+                    optional_string(payload, "evidence"),
+                    required_string(payload, "observed_at")?,
+                ],
             )?
         }
         "decision.add" => transaction.execute(
@@ -4040,9 +4433,9 @@ mod tests {
 
     use super::*;
     use crate::application::{
-        BacklogAddInput, BacklogCloseInput, DecisionAddInput, IntakeInput, InterventionAddInput,
-        InterventionFilter, StoryAddInput, StoryDependencyInput, StoryUpdateInput,
-        ToolRegisterInput, TraceInput,
+        BacklogAddInput, BacklogCloseInput, BacklogOutcomeInput, DecisionAddInput, IntakeInput,
+        InterventionAddInput, InterventionFilter, StoryAddInput, StoryDependencyInput,
+        StoryUpdateInput, ToolRegisterInput, TraceInput,
     };
     use crate::domain::{BacklogFilter, BoolFlag, CsvList, InputType, RiskLane, TraceQualityTier};
 
@@ -6120,6 +6513,220 @@ mod tests {
         assert_eq!(recurrence.0, "regression");
         assert_eq!(recurrence.1.as_deref(), Some(predecessor.as_str()));
         assert_eq!(recurrence.2, 1);
+    }
+
+    #[test]
+    fn improvement_health_outcomes_append_replay_and_open_work_is_refused() {
+        let (_temp_dir, repository) = isolated_test_repository();
+        repository.init().unwrap();
+        let repository = repository.with_run_id("run_improvement_health_outcome");
+        let connection = repository.open_existing().unwrap();
+        let implemented_uid = "blg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        connection.execute(
+            "INSERT INTO backlog (uid, proposal_key, occurrence_kind, title, status, predicted_impact, actual_outcome, outcome_schedule_kind)
+             VALUES (?1, 'improvement.proposal:v1:test', 'original', 'Measured improvement', 'implemented', 'less friction', 'legacy field unchanged', 'manual');",
+            params![implemented_uid],
+        ).unwrap();
+        let implemented_id = connection.last_insert_rowid();
+        connection.execute(
+            "INSERT INTO backlog (uid, proposal_key, occurrence_kind, title, status, outcome_schedule_kind)
+             VALUES ('blg_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'improvement.proposal:v1:open', 'original', 'Open improvement', 'accepted', 'manual');",
+            [],
+        ).unwrap();
+        let open_id = connection.last_insert_rowid();
+
+        let first = repository
+            .record_backlog_outcome(BacklogOutcomeInput {
+                id: implemented_id,
+                status: "confirmed".to_owned(),
+                outcome: "Friction decreased".to_owned(),
+                evidence: Some("five clean traces".to_owned()),
+            })
+            .unwrap();
+        let second = repository
+            .record_backlog_outcome(BacklogOutcomeInput {
+                id: implemented_id,
+                status: "ineffective".to_owned(),
+                outcome: "The initial gain was too small".to_owned(),
+                evidence: Some("benchmark comparison".to_owned()),
+            })
+            .unwrap();
+        let third = repository
+            .record_backlog_outcome(BacklogOutcomeInput {
+                id: implemented_id,
+                status: "reverted".to_owned(),
+                outcome: "The issue returned".to_owned(),
+                evidence: None,
+            })
+            .unwrap();
+        assert_eq!((first.ordinal, second.ordinal, third.ordinal), (1, 2, 3));
+        assert_eq!(
+            repository
+                .record_backlog_outcome(BacklogOutcomeInput {
+                    id: open_id,
+                    status: "confirmed".to_owned(),
+                    outcome: "too early".to_owned(),
+                    evidence: None,
+                })
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "backlog outcome record: backlog item '{open_id}' must be an implemented keyed occurrence"
+            )
+        );
+
+        let connection = repository.open_existing().unwrap();
+        let state: (i64, String, String) = connection
+            .query_row(
+            "SELECT COUNT(*), MAX(CASE WHEN ordinal=3 THEN backlog_outcome_observation.status END), backlog.actual_outcome
+             FROM backlog_outcome_observation
+             JOIN backlog ON backlog.uid=backlog_outcome_observation.backlog_uid
+             WHERE backlog_uid=?1;",
+                params![implemented_uid],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            state,
+            (
+                3,
+                "reverted".to_owned(),
+                "legacy field unchanged".to_owned()
+            )
+        );
+        assert!(repository
+            .audit()
+            .unwrap()
+            .backlog_without_outcomes
+            .is_empty());
+
+        let changeset = repository.changeset_path("run_improvement_health_outcome");
+        let replay = SqliteHarnessRepository::new(
+            repository.repo_root.clone(),
+            repository.repo_root.join("replay.db"),
+            repository.schema_dir.clone(),
+        );
+        replay.init().unwrap();
+        replay.open_existing().unwrap().execute(
+            "INSERT INTO backlog (uid, proposal_key, occurrence_kind, title, status, predicted_impact, actual_outcome, outcome_schedule_kind)
+             VALUES (?1, 'improvement.proposal:v1:test', 'original', 'Measured improvement', 'implemented', 'less friction', 'legacy field unchanged', 'manual');",
+            params![implemented_uid],
+        ).unwrap();
+        replay.apply_changeset(&changeset).unwrap();
+        let replay_count: i64 = replay
+            .open_existing()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM backlog_outcome_observation WHERE backlog_uid=?1;",
+                params![implemented_uid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(replay_count, 3);
+    }
+
+    #[test]
+    fn improvement_health_derives_schedule_states_and_is_read_only() {
+        let (_temp_dir, repository) = isolated_test_repository();
+        repository.init().unwrap();
+        let connection = repository.open_existing().unwrap();
+        for (uid, key, title, kind, due, after, baseline) in [
+            (
+                "blg_11111111111111111111111111111111",
+                "manual",
+                "Manual review",
+                "manual",
+                None,
+                None,
+                None,
+            ),
+            (
+                "blg_22222222222222222222222222222222",
+                "future",
+                "Future review",
+                "due_at",
+                Some("2999-01-01T00:00:00Z"),
+                None,
+                None,
+            ),
+            (
+                "blg_33333333333333333333333333333333",
+                "past",
+                "Due review",
+                "due_at",
+                Some("2000-01-01T00:00:00Z"),
+                None,
+                None,
+            ),
+            (
+                "blg_44444444444444444444444444444444",
+                "traces",
+                "Trace review",
+                "trace_count",
+                None,
+                Some(2),
+                Some(0),
+            ),
+            (
+                "blg_55555555555555555555555555555555",
+                "error",
+                "Broken baseline",
+                "trace_count",
+                None,
+                Some(2),
+                Some(9),
+            ),
+        ] {
+            connection.execute(
+                "INSERT INTO backlog (uid, proposal_key, occurrence_kind, title, status, predicted_impact, outcome_schedule_kind, outcome_due_at, outcome_after_traces, outcome_baseline_trace_count)
+                 VALUES (?1, ?2, 'original', ?3, 'implemented', 'health fixture', ?4, ?5, ?6, ?7);",
+                params![uid, format!("improvement.proposal:v1:{key}"), title, kind, due, after, baseline],
+            ).unwrap();
+        }
+        connection.execute(
+            "INSERT INTO backlog (uid, proposal_key, occurrence_kind, title, status, predicted_impact)
+             VALUES ('blg_66666666666666666666666666666666', 'improvement.proposal:v1:legacy-plan', 'original', 'Missing plan', 'implemented', 'health fixture');",
+            [],
+        ).unwrap();
+        for index in 1..=2 {
+            connection
+                .execute(
+                    "INSERT INTO trace (uid, task_summary) VALUES (?1, 'health trace');",
+                    params![format!("trc_{index:032x}")],
+                )
+                .unwrap();
+        }
+        connection.execute(
+            "INSERT INTO backlog_outcome_observation (uid, backlog_uid, ordinal, status, outcome, observed_at)
+             VALUES ('obs_77777777777777777777777777777777', 'blg_11111111111111111111111111111111', 1, 'legacy_recorded', 'preserved old outcome', '2026-01-01 00:00:00');",
+            [],
+        ).unwrap();
+        drop(connection);
+
+        let before = fs::read(&repository.db_path).unwrap();
+        let health = repository.query_improvement_health().unwrap();
+        let health_again = repository.query_improvement_health().unwrap();
+        let after = fs::read(&repository.db_path).unwrap();
+        assert_eq!(health, health_again);
+        assert_eq!(before, after);
+        let states = health
+            .items
+            .iter()
+            .filter(|item| item.category == "outcome_review")
+            .map(|item| (item.title.as_str(), item.state.as_str()))
+            .collect::<Vec<_>>();
+        assert!(states.contains(&("Manual review", "legacy_recorded")));
+        assert!(states.contains(&("Future review", "scheduled_not_due")));
+        assert!(states.contains(&("Due review", "due")));
+        assert!(states.contains(&("Trace review", "due")));
+        assert!(states.contains(&("Broken baseline", "schedule_error")));
+        assert!(states.contains(&("Missing plan", "awaiting_observation_plan")));
+        let legacy = health
+            .items
+            .iter()
+            .find(|item| item.title == "Manual review")
+            .unwrap();
+        assert_eq!(legacy.outcome, "preserved old outcome");
     }
 
     #[test]

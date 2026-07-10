@@ -136,6 +136,43 @@ pub struct BacklogCloseInput {
 }
 
 #[derive(Debug)]
+pub struct BacklogOutcomeInput {
+    pub id: i64,
+    pub status: String,
+    pub outcome: String,
+    pub evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutcomeObservationRecord {
+    pub backlog_id: i64,
+    pub ordinal: i64,
+    pub status: String,
+    pub outcome: String,
+    pub evidence: Option<String>,
+    pub observed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImprovementHealthItem {
+    pub category: String,
+    pub id: String,
+    pub title: String,
+    pub state: String,
+    pub schedule: String,
+    pub outcome: String,
+    pub evidence: String,
+    pub next_action: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ImprovementHealthResult {
+    pub entropy_score: i64,
+    pub actionable_drift: usize,
+    pub items: Vec<ImprovementHealthItem>,
+}
+
+#[derive(Debug)]
 pub struct TraceInput {
     pub task_summary: String,
     pub intake_id: Option<i64>,
@@ -278,6 +315,13 @@ impl HarnessService {
         self.repository.close_backlog(input)
     }
 
+    pub fn record_backlog_outcome(
+        &self,
+        input: BacklogOutcomeInput,
+    ) -> crate::infrastructure::Result<OutcomeObservationRecord> {
+        self.repository.record_backlog_outcome(input)
+    }
+
     pub fn register_tool(&self, input: ToolRegisterInput) -> crate::infrastructure::Result<()> {
         self.repository.register_tool(input)
     }
@@ -363,6 +407,12 @@ impl HarnessService {
 
     pub fn query_stats(&self) -> crate::infrastructure::Result<HarnessStats> {
         self.repository.query_stats()
+    }
+
+    pub fn query_improvement_health(
+        &self,
+    ) -> crate::infrastructure::Result<ImprovementHealthResult> {
+        self.repository.query_improvement_health()
     }
 
     pub fn audit(&self) -> crate::infrastructure::Result<AuditResult> {

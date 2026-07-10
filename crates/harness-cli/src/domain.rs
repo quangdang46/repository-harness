@@ -412,6 +412,20 @@ pub fn compiled_tool_registry() -> Vec<ToolEntry> {
         ),
         tool(
             "harness-cli",
+            "backlog outcome record",
+            "backlog outcome record",
+            "Append measured impact for an implemented improvement occurrence.",
+            &[
+                ("id", "integer", true),
+                ("status", "enum", true),
+                ("outcome", "string", true),
+                ("evidence", "string", false),
+            ],
+            "Entropy auditing",
+            "0.1.11",
+        ),
+        tool(
+            "harness-cli",
             "trace",
             "trace",
             "Record an agent execution trace.",
@@ -472,6 +486,15 @@ pub fn compiled_tool_registry() -> Vec<ToolEntry> {
             &[],
             "Entropy auditing",
             "0.1.0",
+        ),
+        tool(
+            "harness-cli",
+            "query improvement-health",
+            "query improvement-health",
+            "Show deterministic daily improvement lifecycle and next actions.",
+            &[],
+            "Entropy auditing",
+            "0.1.11",
         ),
         tool(
             "harness-cli",

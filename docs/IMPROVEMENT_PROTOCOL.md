@@ -8,7 +8,8 @@ friction + interventions + audit findings
   -> human accepts or rejects one stable proposal key
   -> accepted backlog occurrence plus outcome-review schedule
   -> implementation with predicted impact
-  -> close with actual outcome
+  -> close with implementation proof
+  -> later append measured outcome observations
 ```
 
 ## Generate Proposals
@@ -80,6 +81,27 @@ Humans review accepted work with:
 scripts/bin/harness-cli query backlog --open
 ```
 
+## Run The Daily Health Loop
+
+Start with the read-only health view:
+
+```bash
+scripts/bin/harness-cli audit --record-evidence
+scripts/bin/harness-cli query improvement-health
+```
+
+The first command explicitly records audit-evidence transitions. The second
+command writes nothing: it combines the current audit entropy, proposal
+decisions, accepted work, scheduled outcome reviews, measured outcomes, and
+recurrence candidates in deterministic order. Each row gives the exact next
+operator action.
+
+For example, an implemented occurrence with a trace-count schedule of 20 and a
+completion baseline of 100 is `scheduled_not_due` at 112 uid-bearing traces
+with 8 remaining. At 120 traces it becomes `due`. If the current count is 99,
+the row is `schedule_error` because Harness refuses to guess after the durable
+count moves below its baseline.
+
 ## Complete Accepted Work
 
 After implementation, the resolving story follows one explicit sequence:
@@ -101,6 +123,24 @@ Failure leaves the story completion-eligible and closes nothing. Repeated or
 concurrent completion is idempotent. Resolution evidence records the story,
 proof command, completion identity, and completion time; it does not claim the
 later measured outcome.
+
+## Record Measured Outcomes
+
+After implementation, record what actually happened without changing the
+completion proof or the legacy `actual_outcome` field:
+
+```bash
+scripts/bin/harness-cli backlog outcome record --id <local-id> \
+  --status confirmed --outcome "Repeated friction fell from 4/5 to 0/5 traces" \
+  --evidence "trace uids trc_... through trc_..."
+```
+
+Allowed statuses are `confirmed`, `ineffective`, and `reverted`. Each command
+appends the next per-occurrence ordinal. A later `reverted` observation becomes
+the current assessment while the earlier `confirmed` row remains immutable.
+Accepted or proposed work is refused because passing implementation proof must
+exist before measured impact can be claimed. A schedule is a reminder, so
+evidence may be recorded before its due date or trace target.
 
 ## Review Rules
 

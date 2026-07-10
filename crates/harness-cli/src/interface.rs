@@ -6,10 +6,11 @@ use clap::{Args, Parser, Subcommand};
 use thiserror::Error;
 
 use crate::application::{
-    BacklogAddInput, BacklogCloseInput, BrownfieldImportResult, ChangesetApplyResult,
-    DbRebuildResult, DecisionAddInput, HarnessContext, HarnessService, InitResult, IntakeInput,
-    InterventionAddInput, InterventionFilter, MigrateResult, QueryTable, StoryAddInput,
-    StoryBacklogLinkInput, StoryDependencyInput, StoryUpdateInput, ToolRegisterInput, TraceInput,
+    BacklogAddInput, BacklogCloseInput, BacklogOutcomeInput, BrownfieldImportResult,
+    ChangesetApplyResult, DbRebuildResult, DecisionAddInput, HarnessContext, HarnessService,
+    ImprovementHealthResult, InitResult, IntakeInput, InterventionAddInput, InterventionFilter,
+    MigrateResult, QueryTable, StoryAddInput, StoryBacklogLinkInput, StoryDependencyInput,
+    StoryUpdateInput, ToolRegisterInput, TraceInput,
 };
 use crate::domain::{
     normalize_capability, parse_optional_integer, parse_tool_args, proof_display,
@@ -277,6 +278,31 @@ enum BacklogAction {
     #[command(after_help = RISK_LANE_HELP)]
     Add(BacklogAddArgs),
     Close(BacklogCloseArgs),
+    /// Append a measured outcome for an implemented improvement occurrence.
+    Outcome(BacklogOutcomeArgs),
+}
+
+#[derive(Args, Debug)]
+struct BacklogOutcomeArgs {
+    #[command(subcommand)]
+    action: BacklogOutcomeAction,
+}
+
+#[derive(Subcommand, Debug)]
+enum BacklogOutcomeAction {
+    Record(BacklogOutcomeRecordArgs),
+}
+
+#[derive(Args, Debug)]
+struct BacklogOutcomeRecordArgs {
+    #[arg(long)]
+    id: String,
+    #[arg(long, value_parser = ["confirmed", "ineffective", "reverted"])]
+    status: String,
+    #[arg(long)]
+    outcome: String,
+    #[arg(long)]
+    evidence: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -522,6 +548,8 @@ enum QueryView {
     Interventions(InterventionsQueryArgs),
     /// Summary counts.
     Stats,
+    /// Read-only daily view of proposal, implementation, outcome, and recurrence health.
+    ImprovementHealth,
     /// Run arbitrary SQL.
     Sql { query: Vec<String> },
 }
@@ -798,6 +826,25 @@ pub fn run(cli: Cli) -> Result<(), InterfaceError> {
                 })?;
                 println!("Backlog #{id} closed as {status}.");
             }
+            BacklogAction::Outcome(args) => match args.action {
+                BacklogOutcomeAction::Record(args) => {
+                    let id = parse_optional_integer("backlog outcome record: --id", Some(args.id))?
+                        .expect("value provided");
+                    let observation = service.record_backlog_outcome(BacklogOutcomeInput {
+                        id,
+                        status: args.status,
+                        outcome: args.outcome,
+                        evidence: args.evidence,
+                    })?;
+                    println!(
+                        "Backlog #{} outcome observation {} recorded as {} at {}.",
+                        observation.backlog_id,
+                        observation.ordinal,
+                        observation.status,
+                        observation.observed_at
+                    );
+                }
+            },
         },
         Command::Tool(args) => match args.action {
             ToolAction::Register(args) => {
@@ -1013,6 +1060,9 @@ pub fn run(cli: Cli) -> Result<(), InterfaceError> {
                 })?);
             }
             QueryView::Stats => print_stats(&service.query_stats()?),
+            QueryView::ImprovementHealth => {
+                print_improvement_health(&service.query_improvement_health()?)
+            }
             QueryView::Sql { query } => {
                 if query.is_empty() {
                     return Err(InterfaceError::EmptySql);
@@ -1692,6 +1742,41 @@ fn print_stats(stats: &HarnessStats) {
     );
 }
 
+fn print_improvement_health(result: &ImprovementHealthResult) {
+    println!("=== Daily Improvement Health ===");
+    println!("Audit entropy: {}/100", result.entropy_score);
+    println!("Actionable drift: {}", result.actionable_drift);
+    let rows = result
+        .items
+        .iter()
+        .map(|item| {
+            vec![
+                item.category.clone(),
+                item.id.clone(),
+                item.title.clone(),
+                item.state.clone(),
+                item.schedule.clone(),
+                item.outcome.clone(),
+                item.evidence.clone(),
+                item.next_action.clone(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    print_table(
+        &[
+            "category",
+            "id",
+            "title",
+            "state",
+            "schedule",
+            "outcome",
+            "evidence",
+            "next_action",
+        ],
+        &rows,
+    );
+}
+
 fn print_query_table(table: &QueryTable) {
     let headers = table.headers.iter().map(String::as_str).collect::<Vec<_>>();
     print_table(&headers, &table.rows);
@@ -1802,6 +1887,41 @@ mod tests {
             Command::Query(QueryArgs {
                 view: QueryView::Dependencies(DependenciesQueryArgs { story: Some(story) })
             }) if story == "US-074"
+        ));
+    }
+
+    #[test]
+    fn improvement_health_commands_parse_typed_outcomes() {
+        let cli = Cli::try_parse_from([
+            "harness-cli",
+            "backlog",
+            "outcome",
+            "record",
+            "--id",
+            "42",
+            "--status",
+            "confirmed",
+            "--outcome",
+            "Friction decreased",
+            "--evidence",
+            "five traces",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Backlog(BacklogArgs {
+                action: BacklogAction::Outcome(BacklogOutcomeArgs {
+                    action: BacklogOutcomeAction::Record(BacklogOutcomeRecordArgs { status, .. })
+                })
+            }) if status == "confirmed"
+        ));
+
+        let cli = Cli::try_parse_from(["harness-cli", "query", "improvement-health"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Query(QueryArgs {
+                view: QueryView::ImprovementHealth
+            })
         ));
     }
 
