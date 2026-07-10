@@ -56,13 +56,20 @@ enum Command {
     /// Score trace context reads against CONTEXT_RULES.md.
     ScoreContext { trace_id: String },
     /// Run drift audit and entropy score.
-    Audit,
+    Audit(AuditArgs),
     /// Generate improvement proposals from observed patterns.
     Propose(ProposeArgs),
     /// Manage harness database changesets.
     Db(DbArgs),
     /// Query harness data.
     Query(QueryArgs),
+}
+
+#[derive(Args, Debug)]
+struct AuditArgs {
+    /// Explicitly persist audit evidence episode transitions.
+    #[arg(long)]
+    record_evidence: bool,
 }
 
 #[derive(Args, Debug)]
@@ -732,7 +739,14 @@ pub fn run(cli: Cli) -> Result<(), InterfaceError> {
                 .expect("value provided");
             print_context_score(&service.score_context(id)?);
         }
-        Command::Audit => print_audit(&service.audit()?),
+        Command::Audit(args) => {
+            let result = if args.record_evidence {
+                service.audit_record_evidence()?
+            } else {
+                service.audit()?
+            };
+            print_audit(&result)
+        }
         Command::Propose(args) => print_proposals(&service.propose(args.commit)?),
         Command::Db(args) => match args.action {
             DbAction::Changeset(args) => match args.action {

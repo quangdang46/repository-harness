@@ -1,6 +1,9 @@
 use std::fmt;
 use std::str::FromStr;
 
+use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization;
+
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -88,6 +91,54 @@ impl FromStr for RiskLane {
 
 pub const RISK_LANE_HELP: &str =
     "Accepted lanes: tiny, normal, high-risk. Use tiny instead of low.";
+
+/// Stable, versioned identity for an improvement issue. The canonical input is
+/// deliberately separate from display text so sorting, confidence, and title
+/// presentation cannot change machine identity.
+pub fn proposal_key(rule_id: &str, rule_version: u32, canonical_issue: &str) -> String {
+    let canonical = canonical_issue
+        .trim()
+        .nfc()
+        .collect::<String>()
+        .to_lowercase();
+    let mut digest = Sha256::new();
+    digest.update(rule_id.as_bytes());
+    digest.update([0]);
+    digest.update(rule_version.to_string().as_bytes());
+    digest.update([0]);
+    digest.update(canonical.as_bytes());
+    let hex = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{rule_id}:v{rule_version}:{hex}")
+}
+
+/// Generate an opaque 128-bit uid from source-owned identity material.
+pub fn stable_uid(prefix: &str, material: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(prefix.as_bytes());
+    digest.update([0]);
+    digest.update(material.as_bytes());
+    let hex = digest
+        .finalize()
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{prefix}_{hex}")
+}
+
+pub fn sha256_hex(material: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(material.as_bytes());
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 pub const RESPONSIBILITIES: &[&str] = &[
     "Task specification",
@@ -1234,6 +1285,25 @@ mod tests {
         assert!(BoolFlag::parse("--unit", "yes").is_err());
     }
 
+    #[test]
+    fn proposal_keys_are_versioned_unicode_safe_and_display_independent() {
+        let composed = proposal_key("audit.example", 1, "Café");
+        let decomposed = proposal_key("audit.example", 1, "Cafe\u{301}");
+        assert_eq!(composed, decomposed);
+        assert_ne!(composed, proposal_key("audit.example", 2, "Café"));
+        assert_ne!(composed, proposal_key("audit.other", 1, "Café"));
+    }
+
+    #[test]
+    fn stable_uids_are_prefixed_lowercase_hex() {
+        let uid = stable_uid("blg", "source identity");
+        assert!(uid.starts_with("blg_"));
+        assert_eq!(uid.len(), 36);
+        assert!(uid[4..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
+    }
+
     fn trace_source() -> TraceScoreSource {
         TraceScoreSource {
             id: 7,
@@ -1324,5 +1394,18 @@ mod tests {
         assert!(result.must.iter().any(|item| item.target
             == "docs/decisions/0005-prebuilt-rust-harness-cli.md"
             && item.met));
+    }
+
+    #[test]
+    fn improvement_identity_is_versioned_and_unicode_safe() {
+        let first = proposal_key("audit.orphaned-story", 1, "Café Story");
+        assert_eq!(
+            first,
+            proposal_key("audit.orphaned-story", 1, " café story ")
+        );
+        assert_ne!(first, proposal_key("audit.orphaned-story", 2, "café story"));
+        assert!(first.starts_with("audit.orphaned-story:v1:"));
+        assert_eq!(stable_uid("ink", "same"), stable_uid("ink", "same"));
+        assert_ne!(stable_uid("ink", "same"), stable_uid("trc", "same"));
     }
 }

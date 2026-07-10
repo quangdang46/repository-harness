@@ -326,6 +326,10 @@ impl HarnessService {
         self.repository.audit()
     }
 
+    pub fn audit_record_evidence(&self) -> crate::infrastructure::Result<AuditResult> {
+        self.repository.audit_record_evidence()
+    }
+
     pub fn propose(&self, commit: bool) -> crate::infrastructure::Result<Vec<ImprovementProposal>> {
         self.repository.propose(commit)
     }

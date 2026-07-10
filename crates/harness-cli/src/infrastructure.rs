@@ -4,6 +4,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, types::ValueRef, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
@@ -17,12 +18,12 @@ use crate::application::{
     StoryVerifyResult, ToolRegisterInput, TraceInput,
 };
 use crate::domain::{
-    compiled_tool_registry, normalize_token, score_context, score_trace, validate_tool_description,
-    AuditFinding, AuditResult, BacklogFilter, BacklogRecord, ContextScoreResult,
-    ContextScoreSource, DecisionRecord, FrictionRecord, HarnessStats, ImprovementProposal,
-    IntakeRecord, InterventionRecord, RiskLane, StoryMatrixRecord, StoryVerifyAllItem,
-    StoryVerifyAllResult, StoryVerifyStatus, ToolArgSpec, ToolEntry, TraceRecord, TraceScoreResult,
-    TraceScoreSource,
+    compiled_tool_registry, normalize_token, proposal_key, score_context, score_trace, sha256_hex,
+    stable_uid, validate_tool_description, AuditFinding, AuditResult, BacklogFilter, BacklogRecord,
+    ContextScoreResult, ContextScoreSource, DecisionRecord, FrictionRecord, HarnessStats,
+    ImprovementProposal, IntakeRecord, InterventionRecord, RiskLane, StoryMatrixRecord,
+    StoryVerifyAllItem, StoryVerifyAllResult, StoryVerifyStatus, ToolArgSpec, ToolEntry,
+    TraceRecord, TraceScoreResult, TraceScoreSource,
 };
 
 pub type Result<T> = std::result::Result<T, HarnessInfraError>;
@@ -126,6 +127,7 @@ pub trait HarnessRepository {
     fn query_interventions(&self, filter: InterventionFilter) -> Result<Vec<InterventionRecord>>;
     fn query_stats(&self) -> Result<HarnessStats>;
     fn audit(&self) -> Result<AuditResult>;
+    fn audit_record_evidence(&self) -> Result<AuditResult>;
     fn propose(&self, commit: bool) -> Result<Vec<ImprovementProposal>>;
     fn query_sql(&self, sql: &str) -> Result<QueryTable>;
     fn apply_changeset(&self, path: &Path) -> Result<ChangesetApplyResult>;
@@ -152,6 +154,14 @@ impl SqliteHarnessRepository {
             db_path,
             schema_dir,
         }
+    }
+
+    fn new_uid(prefix: &str, material: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        stable_uid(prefix, &format!("{material}\0{nanos}"))
     }
 
     fn open_existing(&self) -> Result<Connection> {
@@ -586,11 +596,16 @@ impl HarnessRepository for SqliteHarnessRepository {
             let risk_lane = input.risk_lane.as_db_value().to_owned();
             let risk_flags = input.risk_flags.as_json_text();
             let affected_docs = input.affected_docs.as_json_text();
+            let uid = Self::new_uid(
+                "ink",
+                &format!("{input_type}\0{}\0{risk_lane}", input.summary),
+            );
             transaction.execute(
                 "INSERT INTO intake (
-                    input_type, summary, risk_lane, risk_flags, affected_docs, story_id, notes
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
+                    uid, input_type, summary, risk_lane, risk_flags, affected_docs, story_id, notes
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);",
                 params![
+                    uid,
                     input_type,
                     input.summary,
                     risk_lane,
@@ -602,13 +617,19 @@ impl HarnessRepository for SqliteHarnessRepository {
             )?;
 
             let id = transaction.last_insert_rowid();
+            let created_at: String = transaction.query_row(
+                "SELECT created_at FROM intake WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )?;
             Ok((
                 id,
                 vec![json!({
                     "op": "intake.add",
-                    "version": 1,
-                    "id": id,
+                    "version": 2,
+                    "uid": uid,
                     "payload": {
+                        "created_at": created_at,
                         "input_type": input_type,
                         "summary": input.summary,
                         "risk_lane": risk_lane,
@@ -1000,12 +1021,21 @@ impl HarnessRepository for SqliteHarnessRepository {
         let mut connection = self.open_existing()?;
         self.with_logged_write(&mut connection, |transaction| {
             let risk = input.risk.map(|value| value.as_db_value().to_owned());
+            let uid = Self::new_uid(
+                "blg",
+                &format!(
+                    "{}\0{}",
+                    input.title,
+                    input.discovered_while.as_deref().unwrap_or_default()
+                ),
+            );
             transaction.execute(
                 "INSERT INTO backlog (
-                    title, discovered_while, current_pain, suggested_improvement,
+                    uid, title, discovered_while, current_pain, suggested_improvement,
                     risk, predicted_impact, notes
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);",
                 params![
+                    uid,
                     input.title,
                     input.discovered_while,
                     input.current_pain,
@@ -1016,13 +1046,19 @@ impl HarnessRepository for SqliteHarnessRepository {
                 ],
             )?;
             let id = transaction.last_insert_rowid();
+            let created_at: String = transaction.query_row(
+                "SELECT created_at FROM backlog WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )?;
             Ok((
                 id,
                 vec![json!({
                     "op": "backlog.add",
-                    "version": 1,
-                    "id": id,
+                    "version": 2,
+                    "uid": uid,
                     "payload": {
+                        "created_at": created_at,
                         "title": input.title,
                         "discovered_while": input.discovered_while,
                         "current_pain": input.current_pain,
@@ -1198,10 +1234,14 @@ impl HarnessRepository for SqliteHarnessRepository {
     fn add_intervention(&self, input: InterventionAddInput) -> Result<i64> {
         let mut connection = self.open_existing()?;
         self.with_logged_write(&mut connection, |transaction| {
+            let uid = Self::new_uid("int", &format!("{}\0{}", input.intervention_type, input.description));
+            let trace_uid: Option<String> = input.trace_id.and_then(|trace_id| transaction
+                .query_row("SELECT uid FROM trace WHERE id=?1", params![trace_id], |row| row.get(0)).optional().ok().flatten());
             transaction.execute(
-                "INSERT INTO intervention (trace_id, story_id, type, description, source, impact)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
+                "INSERT INTO intervention (uid, trace_id, story_id, type, description, source, impact)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
                 params![
+                    uid,
                     input.trace_id,
                     input.story_id,
                     input.intervention_type,
@@ -1211,14 +1251,17 @@ impl HarnessRepository for SqliteHarnessRepository {
                 ],
             )?;
             let id = transaction.last_insert_rowid();
+            let created_at: String = transaction.query_row(
+                "SELECT created_at FROM intervention WHERE id=?1", params![id], |row| row.get(0))?;
             Ok((
                 id,
                 vec![json!({
                     "op": "intervention.add",
-                    "version": 1,
-                    "id": id,
+                    "version": 2,
+                    "uid": uid,
                     "payload": {
-                        "trace_id": input.trace_id,
+                        "created_at": created_at,
+                        "trace_uid": trace_uid,
                         "story_id": input.story_id,
                         "type": input.intervention_type,
                         "description": input.description,
@@ -1238,13 +1281,34 @@ impl HarnessRepository for SqliteHarnessRepository {
             let files_changed = input.files_changed.as_json_text();
             let decisions = input.decisions.as_json_text();
             let errors = input.errors.as_json_text();
+            let uid = Self::new_uid(
+                "trc",
+                &format!(
+                    "{}\0{}",
+                    input.task_summary,
+                    input.story_id.as_deref().unwrap_or_default()
+                ),
+            );
+            let intake_uid: Option<String> = input.intake_id.and_then(|intake_id| {
+                transaction
+                    .query_row(
+                        "SELECT uid FROM intake WHERE id=?1",
+                        params![intake_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+            });
             transaction.execute(
                 "INSERT INTO trace (
-                    task_summary, intake_id, story_id, agent,
+                    uid, intake_uid, task_summary, intake_id, story_id, agent,
                     actions_taken, files_read, files_changed, decisions_made, errors,
                     outcome, duration_seconds, token_estimate, harness_friction, notes
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14);",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16);",
                 params![
+                    uid,
+                    intake_uid,
                     input.task_summary,
                     input.intake_id,
                     input.story_id,
@@ -1262,15 +1326,21 @@ impl HarnessRepository for SqliteHarnessRepository {
                 ],
             )?;
             let id = transaction.last_insert_rowid();
+            let created_at: String = transaction.query_row(
+                "SELECT created_at FROM trace WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )?;
             Ok((
                 id,
                 vec![json!({
                     "op": "trace.add",
-                    "version": 1,
-                    "id": id,
+                    "version": 2,
+                    "uid": uid,
                     "payload": {
+                        "created_at": created_at,
                         "task_summary": input.task_summary,
-                        "intake_id": input.intake_id,
+                        "intake_uid": intake_uid,
                         "story_id": input.story_id,
                         "agent": input.agent,
                         "actions_taken": actions,
@@ -1716,8 +1786,68 @@ impl HarnessRepository for SqliteHarnessRepository {
         Ok(result)
     }
 
+    fn audit_record_evidence(&self) -> Result<AuditResult> {
+        let result = self.audit()?;
+        let mut current = Vec::new();
+        for (rule, findings) in [
+            ("orphaned-story", &result.orphaned_stories),
+            ("unverified-story", &result.unverified_stories),
+            ("unverified-decision", &result.unverified_decisions),
+            (
+                "implemented-backlog-without-outcome",
+                &result.backlog_without_outcomes,
+            ),
+            ("stale-story", &result.stale_stories),
+            ("broken-tool", &result.broken_tools),
+        ] {
+            for finding in findings {
+                let key = format!("audit.{rule}:v1:entity:{}", finding.id);
+                let fingerprint = sha256_hex(&format!("{key}\0{}", finding.title));
+                current.push((key, fingerprint));
+            }
+        }
+        let mut connection = self.open_existing()?;
+        self.with_logged_write(&mut connection, |transaction| {
+            let mut operations = Vec::new();
+            let active: Vec<(String, String, String)> = {
+                let mut statement = transaction.prepare(
+                    "SELECT uid, finding_key, evidence_fingerprint FROM audit_evidence_episode WHERE cleared_at IS NULL",
+                )?;
+                let rows = statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+                collect_rows(rows)?
+            };
+            for (uid, finding_key, _) in &active {
+                if !current.iter().any(|(key, _)| key == finding_key) {
+                    transaction.execute(
+                        "UPDATE audit_evidence_episode SET cleared_at=datetime('now') WHERE uid=?1",
+                        params![uid],
+                    )?;
+                    operations.push(json!({"op":"audit.evidence.clear","version":1,"uid":uid,"payload":{"cleared_at": transaction.query_row("SELECT cleared_at FROM audit_evidence_episode WHERE uid=?1", params![uid], |row| row.get::<_, String>(0))?}}));
+                }
+            }
+            for (finding_key, fingerprint) in &current {
+                let existing = active.iter().find(|(_, key, _)| key == finding_key);
+                if existing.is_some_and(|(_, _, old)| old == fingerprint) {
+                    continue;
+                }
+                if let Some((old_uid, _, _)) = existing {
+                    transaction.execute("UPDATE audit_evidence_episode SET cleared_at=datetime('now') WHERE uid=?1", params![old_uid])?;
+                }
+                let uid = Self::new_uid("aud", finding_key);
+                transaction.execute(
+                    "INSERT INTO audit_evidence_episode (uid, finding_key, evidence_fingerprint, opened_at) VALUES (?1, ?2, ?3, datetime('now'))",
+                    params![uid, finding_key, fingerprint],
+                )?;
+                let opened_at: String = transaction.query_row("SELECT opened_at FROM audit_evidence_episode WHERE uid=?1", params![uid], |row| row.get(0))?;
+                operations.push(json!({"op":"audit.evidence.open","version":1,"uid":uid,"payload":{"finding_key":finding_key,"evidence_fingerprint":fingerprint,"opened_at":opened_at}}));
+            }
+            Ok((result, operations))
+        })
+    }
+
     fn propose(&self, commit: bool) -> Result<Vec<ImprovementProposal>> {
-        let connection = self.open_existing()?;
+        let mut connection = self.open_existing()?;
         let audit = self.audit()?;
         let mut proposals = Vec::new();
 
@@ -1785,26 +1915,52 @@ impl HarnessRepository for SqliteHarnessRepository {
         }
 
         if commit {
-            for proposal in &mut proposals {
-                connection.execute(
-                    "INSERT INTO backlog (
-                        title, discovered_while, current_pain, suggested_improvement,
-                        risk, predicted_impact, notes
-                     ) VALUES (?1, 'harness-cli propose', ?2, ?3, ?4, ?5, ?6);",
-                    params![
-                        proposal.title,
-                        proposal.evidence,
-                        proposal.suggested_action,
-                        normalize_token(&proposal.risk),
-                        proposal.predicted_impact,
-                        format!(
-                            "component: {}; confidence: {}; validation: {}",
-                            proposal.component, proposal.confidence, proposal.validation_plan
-                        ),
-                    ],
-                )?;
-                proposal.committed_backlog_id = Some(connection.last_insert_rowid());
-            }
+            self.with_logged_write(&mut connection, |transaction| {
+                let mut operations = Vec::new();
+                for proposal in &mut proposals {
+                    let uid = Self::new_uid("blg", &proposal.title);
+                    let issue = format!("{}\0{}", proposal.component, proposal.title);
+                    let key = proposal_key("improvement.proposal", 1, &issue);
+                    transaction.execute(
+                        "INSERT INTO backlog (
+                            uid, proposal_key, occurrence_kind, title, discovered_while,
+                            current_pain, suggested_improvement, risk, predicted_impact, notes
+                         ) VALUES (?1, ?2, 'original', ?3, 'harness-cli propose', ?4, ?5, ?6, ?7, ?8);",
+                        params![
+                            uid,
+                            key,
+                            proposal.title,
+                            proposal.evidence,
+                            proposal.suggested_action,
+                            normalize_token(&proposal.risk),
+                            proposal.predicted_impact,
+                            format!(
+                                "component: {}; confidence: {}; validation: {}",
+                                proposal.component, proposal.confidence, proposal.validation_plan
+                            ),
+                        ],
+                    )?;
+                    let id = transaction.last_insert_rowid();
+                    let created_at: String = transaction.query_row(
+                        "SELECT created_at FROM backlog WHERE id=?1", params![id], |row| row.get(0)
+                    )?;
+                    proposal.committed_backlog_id = Some(id);
+                    operations.push(json!({
+                        "op": "backlog.add", "version": 2, "id": id, "uid": uid,
+                        "payload": {
+                            "created_at": created_at, "proposal_key": key,
+                            "occurrence_kind": "original", "title": proposal.title,
+                            "discovered_while": "harness-cli propose",
+                            "current_pain": proposal.evidence,
+                            "suggested_improvement": proposal.suggested_action,
+                            "risk": normalize_token(&proposal.risk),
+                            "predicted_impact": proposal.predicted_impact,
+                            "notes": format!("component: {}; confidence: {}; validation: {}", proposal.component, proposal.confidence, proposal.validation_plan)
+                        }
+                    }));
+                }
+                Ok(((), operations))
+            })?;
         }
 
         Ok(proposals)
@@ -2523,8 +2679,26 @@ fn apply_changeset_operation(
     context: &mut ChangesetApplyContext,
 ) -> Result<()> {
     let op = required_string(operation, "op")?;
+    let version = operation
+        .get("version")
+        .and_then(Value::as_i64)
+        .unwrap_or(1);
     let payload = operation.get("payload").unwrap_or(&Value::Null);
+    if !(1..=2).contains(&version) {
+        return Err(HarnessInfraError::InvalidChangeset(format!(
+            "unsupported version {version} for operation {op}"
+        )));
+    }
     match op.as_str() {
+        "intake.add" if version == 2 => {
+            let uid = required_uid(operation, "uid", "ink")?;
+            transaction.execute(
+                "INSERT INTO intake (uid, created_at, input_type, summary, risk_lane, risk_flags, affected_docs, story_id, notes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9);",
+                params![uid, required_string(payload, "created_at")?, required_string(payload, "input_type")?, required_string(payload, "summary")?, required_string(payload, "risk_lane")?, optional_string(payload, "risk_flags"), optional_string(payload, "affected_docs"), optional_string(payload, "story_id"), optional_string(payload, "notes")],
+            )?;
+            1
+        }
         "intake.add" => {
             let source_id = required_i64(operation, "id")?;
             transaction.execute(
@@ -2634,6 +2808,15 @@ fn apply_changeset_operation(
                 required_string(operation, "id")?,
             ],
         )?,
+        "backlog.add" if version == 2 => {
+            let uid = required_uid(operation, "uid", "blg")?;
+            transaction.execute(
+                "INSERT INTO backlog (uid, created_at, proposal_key, occurrence_kind, title, discovered_while, current_pain, suggested_improvement, risk, predicted_impact, notes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);",
+                params![uid, required_string(payload, "created_at")?, optional_string(payload, "proposal_key"), optional_string(payload, "occurrence_kind"), required_string(payload, "title")?, optional_string(payload, "discovered_while"), optional_string(payload, "current_pain"), optional_string(payload, "suggested_improvement"), optional_string(payload, "risk"), optional_string(payload, "predicted_impact"), optional_string(payload, "notes")],
+            )?;
+            1
+        }
         "backlog.add" => {
             let source_id = required_i64(operation, "id")?;
             transaction.execute(
@@ -2693,6 +2876,15 @@ fn apply_changeset_operation(
             "DELETE FROM tool WHERE name=?1;",
             params![required_string(operation, "id")?],
         )?,
+        "intervention.add" if version == 2 => {
+            let uid = required_uid(operation, "uid", "int")?;
+            let trace_id = resolve_uid(transaction, optional_string(payload, "trace_uid"), "trace")?;
+            transaction.execute(
+            "INSERT INTO intervention (uid, created_at, trace_id, story_id, type, description, source, impact)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);",
+            params![uid, required_string(payload, "created_at")?, trace_id, optional_string(payload, "story_id"), required_string(payload, "type")?, required_string(payload, "description")?, required_string(payload, "source")?, optional_string(payload, "impact")],
+            )?
+        }
         "intervention.add" => transaction.execute(
             "INSERT INTO intervention (trace_id, story_id, type, description, source, impact)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
@@ -2705,6 +2897,32 @@ fn apply_changeset_operation(
                 optional_string(payload, "impact"),
             ],
         )?,
+        "trace.add" if version == 2 => {
+            let uid = required_uid(operation, "uid", "trc")?;
+            let intake_id = resolve_uid(transaction, optional_string(payload, "intake_uid"), "intake")?;
+            transaction.execute(
+            "INSERT INTO trace (uid, created_at, intake_uid, task_summary, intake_id, story_id, agent,
+                actions_taken, files_read, files_changed, decisions_made, errors,
+                outcome, duration_seconds, token_estimate, harness_friction, notes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17);",
+            params![uid, required_string(payload, "created_at")?, optional_string(payload, "intake_uid"), required_string(payload, "task_summary")?, intake_id, optional_string(payload, "story_id"), optional_string(payload, "agent"), optional_string(payload, "actions_taken"), optional_string(payload, "files_read"), optional_string(payload, "files_changed"), optional_string(payload, "decisions_made"), optional_string(payload, "errors"), optional_string(payload, "outcome"), optional_i64(payload, "duration_seconds"), optional_i64(payload, "token_estimate"), optional_string(payload, "harness_friction"), optional_string(payload, "notes")],
+            )?;
+            1
+        }
+        "audit.evidence.open" => {
+            transaction.execute(
+                "INSERT INTO audit_evidence_episode (uid, finding_key, evidence_fingerprint, opened_at) VALUES (?1, ?2, ?3, ?4)",
+                params![required_string(operation, "uid")?, required_string(payload, "finding_key")?, required_string(payload, "evidence_fingerprint")?, required_string(payload, "opened_at")?],
+            )?;
+            1
+        }
+        "audit.evidence.clear" => {
+            transaction.execute(
+                "UPDATE audit_evidence_episode SET cleared_at=?1 WHERE uid=?2",
+                params![required_string(payload, "cleared_at")?, required_string(operation, "uid")?],
+            )?;
+            1
+        }
         "trace.add" => {
             let source_id = required_i64(operation, "id")?;
             transaction.execute(
@@ -2777,6 +2995,34 @@ fn required_string(value: &Value, field: &str) -> Result<String> {
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .ok_or_else(|| HarnessInfraError::InvalidChangeset(format!("missing string field {field}")))
+}
+
+fn required_uid(value: &Value, field: &str, prefix: &str) -> Result<String> {
+    let uid = required_string(value, field)?;
+    let valid = uid.strip_prefix(&format!("{prefix}_")).is_some_and(|hex| {
+        hex.len() == 32 && hex.chars().all(|character| character.is_ascii_hexdigit())
+    });
+    if valid {
+        Ok(uid)
+    } else {
+        Err(HarnessInfraError::InvalidChangeset(format!(
+            "invalid {prefix} uid in {field}"
+        )))
+    }
+}
+
+fn resolve_uid(
+    transaction: &Transaction<'_>,
+    uid: Option<String>,
+    table: &str,
+) -> Result<Option<i64>> {
+    let Some(uid) = uid else { return Ok(None) };
+    let sql = format!("SELECT id FROM {table} WHERE uid=?1");
+    transaction
+        .query_row(&sql, params![uid], |row| row.get(0))
+        .optional()?
+        .map(Some)
+        .ok_or_else(|| HarnessInfraError::InvalidChangeset(format!("unknown {table} uid")))
 }
 
 fn optional_string(value: &Value, field: &str) -> Option<String> {
@@ -2858,7 +3104,7 @@ mod tests {
         assert_eq!(repository.query_stats().unwrap().intakes, 0);
         let connection = repository.open_existing().unwrap();
         let schema_version = SqliteHarnessRepository::schema_version(&connection).unwrap();
-        assert_eq!(schema_version, 8);
+        assert_eq!(schema_version, 9);
         let story_columns = story_columns(&connection);
         assert!(story_columns.contains(&"verify_command".to_owned()));
         assert!(story_columns.contains(&"last_verified_at".to_owned()));
@@ -2917,7 +3163,7 @@ mod tests {
         let header: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(header["op"], "changeset.header");
         assert_eq!(header["run_id"], "run_test");
-        assert_eq!(header["base_schema_version"], 8);
+        assert_eq!(header["base_schema_version"], 9);
         let operation: Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(operation["op"], "intake.add");
         assert_eq!(operation["payload"]["summary"], "Logged write test");
@@ -3150,7 +3396,7 @@ mod tests {
         let connection = repository.open_existing().unwrap();
         assert_eq!(
             SqliteHarnessRepository::schema_version(&connection).unwrap(),
-            8
+            9
         );
         let applied = connection
             .query_row(
@@ -3261,11 +3507,11 @@ mod tests {
         let result = repository.migrate().unwrap();
 
         assert_eq!(result.current_version, 1);
-        assert_eq!(result.applied, vec![2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(result.applied, vec![2, 3, 4, 5, 6, 7, 8, 9]);
         let connection = repository.open_existing().unwrap();
         assert_eq!(
             SqliteHarnessRepository::schema_version(&connection).unwrap(),
-            8
+            9
         );
         let story_columns = story_columns(&connection);
         assert!(story_columns.contains(&"verify_command".to_owned()));
@@ -3315,7 +3561,7 @@ mod tests {
         drop(connection);
 
         // Upgrade: migration 005 must infer kind from the command prefix.
-        assert_eq!(repository.migrate().unwrap().applied, vec![5, 6, 7, 8]);
+        assert_eq!(repository.migrate().unwrap().applied, vec![5, 6, 7, 8, 9]);
         let connection = repository.open_existing().unwrap();
         let kind_of = |name: &str| -> String {
             connection
