@@ -21,3 +21,5 @@ Create the real epic names from the user-provided spec, not from this template.
 | `E05-symphony-local-runner` | Build the on-demand local workbench: doctor, work list, isolated prepare, run contract, result validation, and status. | `harness-symphony run <story-id> --prepare-only` satisfies the MVP acceptance criteria. |
 | `E06-symphony-review-sync` | Make run artifacts reviewable and merged changesets syncable. | PR artifacts are reviewable and `sync` is idempotent. |
 | `E07-symphony-automation` | Add lightweight tiny runs and later unattended automation. | Automation reuses the proven local run contract and sync model. |
+| `E08-symphony-web-ui-controller` | Expose Harness stories and Symphony runs through the local browser and Electron controller. | Humans can start, observe, review, recover, merge-gate, and sync dependency-aware work from the controller. |
+| `E09-self-improving-harness-lifecycle` | Carry evidence-backed Harness proposals through acceptance, verified closure, recurrence, and measured outcome. | Handled evidence stays explainable and suppressed; only new recurrence becomes human-reviewable work. |
