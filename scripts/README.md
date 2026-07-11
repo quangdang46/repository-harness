@@ -14,8 +14,11 @@ scripts/bin/harness-cli intake ...    # Record a feature intake classification
 scripts/bin/harness-cli story ...     # Add or update a story (test matrix row)
 scripts/bin/harness-cli story update --id US-001 --unit 1 --integration 1 --e2e 0 --platform 0
 scripts/bin/harness-cli story verify US-001  # Run the story's verify_command
+scripts/bin/harness-cli story complete US-001 # Fresh proof plus atomic lifecycle completion
 scripts/bin/harness-cli decision ...  # Add a decision or run its verification
 scripts/bin/harness-cli backlog ...   # Add or close a backlog item
+scripts/bin/harness-cli propose       # Classify new, active, handled, and recurring evidence
+scripts/bin/harness-cli propose --show-suppressed # Explain handled evidence
 scripts/bin/harness-cli trace ...     # Record and auto-score an agent execution trace
 scripts/bin/harness-cli score-trace   # Score a trace against TRACE_SPEC.md tiers
 scripts/bin/harness-cli query ...     # Query harness data, including backlog --open/--closed
@@ -73,6 +76,7 @@ scripts/bin/harness-cli intake ...
 scripts/bin/harness-cli story add ...
 scripts/bin/harness-cli story update ...
 scripts/bin/harness-cli story verify ...
+scripts/bin/harness-cli story complete ...
 scripts/bin/harness-cli decision add ...
 scripts/bin/harness-cli decision verify ...
 scripts/bin/harness-cli backlog add ...
@@ -190,6 +194,19 @@ test:platform
 test:release
   full suite, log checks, and performance smoke
 ```
+
+## Changeset Rebuild Validation
+
+Run the durable repository rebuild and its validator contract regressions:
+
+```bash
+scripts/validate-changeset-rebuild.sh
+scripts/test-validate-changeset-rebuild.sh
+```
+
+The validator builds the current workspace CLI unless `HARNESS_CLI` is set
+explicitly. `HARNESS_CHANGESET_DIR` can point validation at a copied fixture
+history without changing the repository changesets.
 
 ## Release Packaging
 

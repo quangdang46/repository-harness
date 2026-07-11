@@ -110,6 +110,7 @@ scripts/bin/harness-cli story   add --id <id> --title <text> --lane <lane>
 scripts/bin/harness-cli story   update --id <id> --status <status>
 scripts/bin/harness-cli story   update --id <id> --unit 1 --integration 1 --e2e 0 --platform 0
 scripts/bin/harness-cli story   verify <id>
+scripts/bin/harness-cli story   complete <id>
 scripts/bin/harness-cli story   verify-all
 scripts/bin/harness-cli decision add --id <id> --title <text> --doc docs/decisions/<file>.md
 scripts/bin/harness-cli trace   --summary <text> --outcome <outcome>
@@ -272,6 +273,14 @@ Use `scripts/bin/harness-cli query matrix --numeric` when copying proof values
 back into `story update`. The default matrix output is human-readable
 `yes`/`no`; the numeric output mirrors CLI input.
 
+`story complete <id>` is the explicit lifecycle transition for completed work.
+It requires an `in_progress` or `changed` story, runs fresh proof, and marks the
+story implemented only when that proof passes. Resolver stories additionally
+require a stable linked Harness-improvement intake and a completed matching
+implementation trace recorded after the newest resolver link. On pass, story
+proof and eligible accepted backlog closures are committed atomically and
+replayably. Ordinary `story verify` and `story verify-all` remain proof-only.
+
 ## Phase 5 Evolution Commands
 
 Tool discovery:
@@ -307,12 +316,15 @@ Improvement proposals:
 
 ```bash
 scripts/bin/harness-cli propose
-scripts/bin/harness-cli propose --commit
+scripts/bin/harness-cli propose --accept <proposal-key> --outcome-after-traces 20
+scripts/bin/harness-cli propose --reject <proposal-key> --reason "Not worth the added complexity"
 ```
 
-`propose` prints deterministic proposals from repeated friction, interventions,
-and audit drift. `--commit` creates proposed backlog items only; it does not
-edit policy docs or approve the proposal.
+`propose` prints deterministic, read-only proposals from repeated friction,
+interventions, and audit drift. A human explicitly accepts one key with exactly
+one outcome schedule or rejects one key with a reason. The old bulk
+`--commit` path is rejected so displayed proposals cannot become accidental
+work items.
 
 ## Decision Records
 

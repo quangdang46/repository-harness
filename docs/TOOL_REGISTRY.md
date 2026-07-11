@@ -153,12 +153,20 @@ without parsing the human table.
 | `intake` | Task specification | Record a feature intake classification. | `--type`, `--summary`, `--lane` |
 | `story add` | Task state | Create a durable story record. | `--id`, `--title`, `--lane`, optional `--verify` |
 | `story update` | Task state | Update story status, proof flags, evidence, or verification command. | `--id`, optional proof/status fields |
+| `story dependency add` | Task state | Add a cycle-safe durable dependency edge. | `--blocker`, `--blocked` |
+| `story dependency remove` | Task state | Remove a durable dependency edge; missing edges are unchanged. | `--blocker`, `--blocked` |
+| `story backlog link` | Task state | Add a replayable `resolves` or `references` link to a stable backlog occurrence. | `--story`, `--backlog`, `--relationship` |
+| `story backlog unlink` | Task state | Remove a relationship; closed resolver provenance remains immutable. | `--story`, `--backlog` |
+| `story backlog list` | Task state | Show story-to-backlog relationships. | optional `--story`, `--backlog` |
 | `story verify` | Verification | Run one story `verify_command` and record pass/fail. | story id |
+| `story complete` | Task state | Run fresh proof and atomically implement an eligible story plus accepted resolver backlog work. | story id |
 | `story verify-all` | Verification | Run all configured story verification commands and skip stories without one. | none |
 | `decision add` | Project memory | Create a durable decision record. | `--id`, `--title`, optional `--doc`, `--verify` |
 | `decision verify` | Verification | Run one decision verification command. | decision id |
 | `backlog add` | Entropy auditing | Record a harness improvement proposal. | `--title`, optional pain/suggestion/risk/predicted fields |
 | `backlog close` | Entropy auditing | Close a backlog item with outcome evidence. | `--id`, optional `--status`, `--outcome` |
+| `backlog reconcile` | Entropy auditing | Preview or apply conservative legacy lifecycle identity backfill. | `--action backfill-lifecycle-identity`, exactly one of `--dry-run` or `--apply` |
+| `backlog outcome record` | Entropy auditing | Append a measured outcome to an implemented keyed occurrence. | `--id`, `--status`, `--outcome`, optional `--evidence` |
 | `tool register` | Tool access | Register an external project tool. | `--name`, `--command`, `--description`, `--responsibility`, optional `--kind`, `--capability`, `--scan`, `--args`, `--force` |
 | `tool check` | Tool access | Scan registered tools and persist present/missing/unknown status. | optional `--name`, `--json` |
 | `tool remove` | Tool access | Remove a registered external tool. | `--name` |
@@ -167,9 +175,10 @@ without parsing the human table.
 | `score-trace` | Observability | Score trace detail against lane requirements. | optional `--id` |
 | `score-context` | Context selection | Score trace reads against compiled context rules. | trace id |
 | `audit` | Entropy auditing | Run drift checks and compute entropy score. | none |
-| `propose` | Entropy auditing | Generate improvement proposals from friction, interventions, and audit findings. | optional `--commit` |
+| `propose` | Entropy auditing | Read deterministic improvement proposals, or explicitly accept/reject one stable key. | `--accept <key>` plus one outcome schedule, or `--reject <key> --reason <text>` |
 | `query matrix` | Task state | Show durable story proof matrix. | optional `--numeric` |
-| `query backlog` | Entropy auditing | Show harness improvement backlog. | optional `--open`, `--closed` |
+| `query dependencies` | Task state | Show story dependency edges. | optional `--story` |
+| `query backlog` | Entropy auditing | Show Harness improvement backlog and, with `--id`, its relationships. | optional `--open`, `--closed`, `--id` |
 | `query decisions` | Project memory | Show durable decision records. | none |
 | `query intakes` | Task specification | Show recent intake records. | none |
 | `query traces` | Observability | Show recent trace records. | none |

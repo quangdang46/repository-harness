@@ -4,24 +4,31 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, types::ValueRef, Connection, OptionalExtension, Transaction};
+use chrono::{DateTime, NaiveDateTime, Utc};
+use rusqlite::{
+    params, types::ValueRef, Connection, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde_json::{json, Value};
 use thiserror::Error;
 
 use crate::application::{
-    BacklogAddInput, BacklogCloseInput, BrownfieldImportResult, ChangesetApplyResult,
-    DbRebuildResult, DecisionAddInput, DecisionVerifyResult, HarnessContext, InitResult,
-    IntakeInput, InterventionAddInput, InterventionFilter, MigrateResult, QueryTable,
-    StoryAddInput, StoryUpdateInput, StoryVerifyResult, ToolRegisterInput, TraceInput,
+    BacklogAddInput, BacklogCloseInput, BacklogOutcomeInput, BrownfieldImportResult,
+    ChangesetApplyResult, DbRebuildResult, DecisionAddInput, DecisionVerifyResult, HarnessContext,
+    ImprovementHealthItem, ImprovementHealthResult, InitResult, IntakeInput, InterventionAddInput,
+    InterventionFilter, LegacyReconcileRecord, LegacyReconcileResult, MigrateResult,
+    OutcomeObservationRecord, QueryTable, StoryAddInput, StoryBacklogLinkInput,
+    StoryBacklogLinkRecord, StoryCompleteResult, StoryDependencyInput, StoryDependencyRecord,
+    StoryUpdateInput, StoryVerifyResult, ToolRegisterInput, TraceInput,
 };
 use crate::domain::{
-    compiled_tool_registry, normalize_token, score_context, score_trace, validate_tool_description,
-    AuditFinding, AuditResult, BacklogFilter, BacklogRecord, ContextScoreResult,
-    ContextScoreSource, DecisionRecord, FrictionRecord, HarnessStats, ImprovementProposal,
-    IntakeRecord, InterventionRecord, RiskLane, StoryMatrixRecord, StoryVerifyAllItem,
-    StoryVerifyAllResult, StoryVerifyStatus, ToolArgSpec, ToolEntry, TraceRecord, TraceScoreResult,
-    TraceScoreSource,
+    compiled_tool_registry, normalize_token, proposal_key, score_context, score_trace, sha256_hex,
+    stable_uid, validate_tool_description, AuditFinding, AuditResult, BacklogFilter, BacklogRecord,
+    ContextScoreResult, ContextScoreSource, DecisionRecord, FrictionRecord, HarnessStats,
+    ImprovementProposal, IntakeRecord, InterventionRecord, ProposalEvidence, RiskLane,
+    StoryMatrixRecord, StoryVerifyAllItem, StoryVerifyAllResult, StoryVerifyStatus, ToolArgSpec,
+    ToolEntry, TraceRecord, TraceScoreResult, TraceScoreSource,
 };
 
 pub type Result<T> = std::result::Result<T, HarnessInfraError>;
@@ -38,8 +45,30 @@ pub enum HarnessInfraError {
     MissingDecisionVerifyCommand(String),
     #[error("story {0} has no verify_command. Configure one with: harness-cli story update --id {0} --verify \"<command>\"")]
     MissingStoryVerifyCommand(String),
+    #[error("story complete: {0}")]
+    StoryCompletion(String),
     #[error("story update: story '{0}' not found")]
     StoryNotFound(String),
+    #[error("story dependency: a story cannot depend on itself ('{0}')")]
+    StoryDependencySelf(String),
+    #[error("story dependency: adding '{0}' -> '{1}' would create a cycle")]
+    StoryDependencyCycle(String, String),
+    #[error("story backlog: backlog item '{0}' not found")]
+    StoryBacklogNotFound(i64),
+    #[error(
+        "story backlog: backlog item '{0}' requires legacy reconciliation before it can be linked"
+    )]
+    StoryBacklogLegacy(i64),
+    #[error("story backlog: relationship must be resolves or references")]
+    StoryBacklogRelationship,
+    #[error("story backlog: resolver links require accepted backlog item '{0}'")]
+    StoryBacklogResolverRequiresAccepted(i64),
+    #[error("story backlog: story '{0}' is terminal and cannot change a resolver link")]
+    StoryBacklogTerminalStory(String),
+    #[error("story backlog: backlog item '{0}' already has resolver story '{1}'")]
+    StoryBacklogResolverExists(i64, String),
+    #[error("story backlog: resolver link for backlog item '{0}' is immutable after closure")]
+    StoryBacklogResolverImmutable(i64),
     #[error("tool register: tool '{0}' already exists with command '{1}'")]
     ToolAlreadyExists(String, String),
     #[error("tool remove: tool '{0}' not found")]
@@ -50,6 +79,16 @@ pub enum HarnessInfraError {
     ToolValidation(#[from] crate::domain::ToolValidationError),
     #[error("backlog close: backlog item '{0}' not found")]
     BacklogNotFound(i64),
+    #[error("backlog close: keyed lifecycle occurrence '{0}' must be completed through story complete or rejected through propose --reject")]
+    KeyedBacklogClose(i64),
+    #[error("backlog outcome record: backlog item '{0}' must be an implemented keyed occurrence")]
+    BacklogOutcomeNotImplemented(i64),
+    #[error("backlog outcome record: status must be confirmed, ineffective, or reverted")]
+    BacklogOutcomeStatus,
+    #[error("proposal decision: {0}")]
+    ProposalDecision(String),
+    #[error("legacy reconciliation: {0}")]
+    LegacyReconciliation(String),
     #[error("trace '{0}' not found")]
     TraceNotFound(i64),
     #[error("no traces found")]
@@ -90,12 +129,28 @@ pub trait HarnessRepository {
     fn record_intake(&self, input: IntakeInput) -> Result<i64>;
     fn add_story(&self, input: StoryAddInput) -> Result<()>;
     fn update_story(&self, input: StoryUpdateInput) -> Result<()>;
+    fn add_story_dependency(&self, input: StoryDependencyInput) -> Result<bool>;
+    fn remove_story_dependency(&self, input: StoryDependencyInput) -> Result<bool>;
+    fn link_story_backlog(&self, input: StoryBacklogLinkInput) -> Result<bool>;
+    fn unlink_story_backlog(&self, story_id: &str, backlog_id: i64) -> Result<bool>;
+    fn query_story_backlog_links(
+        &self,
+        story: Option<&str>,
+        backlog_id: Option<i64>,
+    ) -> Result<Vec<StoryBacklogLinkRecord>>;
+    fn query_story_dependencies(&self, story: Option<&str>) -> Result<Vec<StoryDependencyRecord>>;
     fn verify_story(&self, id: &str) -> Result<StoryVerifyResult>;
+    fn complete_story(&self, id: &str) -> Result<StoryCompleteResult>;
     fn verify_all_stories(&self) -> Result<StoryVerifyAllResult>;
     fn add_decision(&self, input: DecisionAddInput) -> Result<()>;
     fn verify_decision(&self, id: &str) -> Result<DecisionVerifyResult>;
     fn add_backlog(&self, input: BacklogAddInput) -> Result<i64>;
     fn close_backlog(&self, input: BacklogCloseInput) -> Result<()>;
+    fn record_backlog_outcome(
+        &self,
+        input: BacklogOutcomeInput,
+    ) -> Result<OutcomeObservationRecord>;
+    fn reconcile_legacy_improvements(&self, apply: bool) -> Result<LegacyReconcileResult>;
     fn register_tool(&self, input: ToolRegisterInput) -> Result<()>;
     fn remove_tool(&self, name: &str) -> Result<()>;
     fn check_tools(&self, name: Option<String>) -> Result<Vec<ToolCheckResult>>;
@@ -117,11 +172,27 @@ pub trait HarnessRepository {
     ) -> Result<Vec<ToolEntry>>;
     fn query_interventions(&self, filter: InterventionFilter) -> Result<Vec<InterventionRecord>>;
     fn query_stats(&self) -> Result<HarnessStats>;
+    fn query_improvement_health(&self) -> Result<ImprovementHealthResult>;
     fn audit(&self) -> Result<AuditResult>;
-    fn propose(&self, commit: bool) -> Result<Vec<ImprovementProposal>>;
+    fn audit_record_evidence(&self) -> Result<AuditResult>;
+    fn propose(&self, decision: ProposalDecision) -> Result<ProposalResult>;
     fn query_sql(&self, sql: &str) -> Result<QueryTable>;
     fn apply_changeset(&self, path: &Path) -> Result<ChangesetApplyResult>;
     fn rebuild_db(&self, changeset_dir: &Path) -> Result<DbRebuildResult>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProposalDecision {
+    Preview,
+    PreviewSuppressed,
+    Accept { key: String, schedule: String },
+    Reject { key: String, reason: String },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProposalResult {
+    pub proposals: Vec<ImprovementProposal>,
+    pub message: Option<String>,
 }
 
 #[derive(Debug)]
@@ -129,6 +200,9 @@ pub struct SqliteHarnessRepository {
     repo_root: PathBuf,
     db_path: PathBuf,
     schema_dir: PathBuf,
+    run_id_override: Option<String>,
+    #[cfg(test)]
+    verification_env_override: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -137,13 +211,309 @@ struct ChangesetAppend {
     original_len: u64,
 }
 
+#[derive(Debug, Default)]
+struct StoryCompletionContext {
+    intake_uid: Option<String>,
+    trace_uid: Option<String>,
+}
+
+#[derive(Debug)]
+struct StoryCompletionWrite {
+    already_completed: bool,
+    context: StoryCompletionContext,
+    closed_backlog_ids: Vec<i64>,
+    already_closed_backlog_ids: Vec<i64>,
+    referenced_backlog_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct LegacyBacklogRow {
+    id: i64,
+    title: String,
+    status: String,
+    actual_outcome: Option<String>,
+    legacy_payload: Value,
+}
+
+#[derive(Debug, Clone)]
+struct LegacyEvidenceCapture {
+    uid: String,
+    source_kind: String,
+    source_local_id: i64,
+    fingerprint: String,
+    canonical_payload: String,
+}
+
+#[derive(Debug, Clone)]
+struct LegacyReconcileCandidate {
+    row: LegacyBacklogRow,
+    record: LegacyReconcileRecord,
+    backlog_uid: Option<String>,
+    evidence: Vec<(ProposalEvidence, Option<LegacyEvidenceCapture>)>,
+}
+
 impl SqliteHarnessRepository {
     pub fn new(repo_root: PathBuf, db_path: PathBuf, schema_dir: PathBuf) -> Self {
         Self {
             repo_root,
             db_path,
             schema_dir,
+            run_id_override: None,
+            #[cfg(test)]
+            verification_env_override: Vec::new(),
         }
+    }
+
+    #[cfg(test)]
+    fn with_run_id(mut self, run_id: &str) -> Self {
+        self.run_id_override = Some(run_id.to_owned());
+        self
+    }
+
+    fn verification_output(&self, verify_command: &str) -> std::io::Result<std::process::Output> {
+        let (shell, flag) = verifier_shell();
+        let mut command = Command::new(shell);
+        command
+            .arg(flag)
+            .arg(verify_command)
+            .current_dir(&self.repo_root);
+        #[cfg(test)]
+        for (key, value) in &self.verification_env_override {
+            command.env(key, value);
+        }
+        command
+            .env_remove("HARNESS_RUN_ID")
+            .env_remove("HARNESS_RUN_MODE")
+            .env_remove("HARNESS_DB_PATH")
+            .output()
+    }
+
+    fn new_uid(prefix: &str, material: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        stable_uid(prefix, &format!("{material}\0{nanos}"))
+    }
+
+    fn unix_time_nanos() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos().min(i64::MAX as u128) as i64)
+            .unwrap_or_default()
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn decide_proposal(
+        &self,
+        connection: &mut Connection,
+        proposals: &[ImprovementProposal],
+        key: &str,
+        schedule: Option<String>,
+        rejection_reason: Option<String>,
+    ) -> Result<String> {
+        let proposal = proposals
+            .iter()
+            .find(|proposal| proposal.key == key)
+            .ok_or_else(|| {
+                HarnessInfraError::ProposalDecision(format!(
+                    "unknown or stale proposal key '{key}'"
+                ))
+            })?;
+        if let Some(reason) = &rejection_reason {
+            if reason.trim().is_empty() {
+                return Err(HarnessInfraError::ProposalDecision(
+                    "rejection reason must be nonblank".to_owned(),
+                ));
+            }
+        }
+        if proposal
+            .evidence_items
+            .iter()
+            .any(|item| item.source_kind == "legacy_snapshot" && item.uid.starts_with("audit."))
+        {
+            return Err(HarnessInfraError::ProposalDecision(
+                "audit proposal evidence is not recorded; run harness-cli audit --record-evidence"
+                    .to_owned(),
+            ));
+        }
+        let parsed_schedule = schedule
+            .as_deref()
+            .map(parse_observation_schedule)
+            .transpose()?;
+        if let Some((kind, Some(due), _)) = &parsed_schedule {
+            debug_assert_eq!(kind, "due_at");
+            let future: i64 = connection.query_row(
+                "SELECT CASE WHEN datetime(?1) > datetime('now') THEN 1 ELSE 0 END;",
+                params![due],
+                |row| row.get(0),
+            )?;
+            if future != 1 {
+                return Err(HarnessInfraError::ProposalDecision(
+                    "outcome due time must be later than acceptance".to_owned(),
+                ));
+            }
+        }
+        let legacy_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM backlog WHERE proposal_key IS NULL AND title=?1;",
+            params![proposal.title],
+            |row| row.get(0),
+        )?;
+        if legacy_count > 0 {
+            return Err(HarnessInfraError::ProposalDecision(
+                "requires legacy reconciliation".to_owned(),
+            ));
+        }
+
+        self.with_logged_write(connection, |transaction| {
+            let existing: Option<(i64, String, String, Option<String>, Option<String>, Option<i64>, Option<String>, Option<String>)> = transaction.query_row(
+                "SELECT id, uid, status, outcome_schedule_kind, outcome_due_at, outcome_after_traces, notes, rejection_reason
+                 FROM backlog WHERE proposal_key=?1 ORDER BY id DESC LIMIT 1;",
+                params![key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?))
+            ).optional()?;
+            if let Some((id, uid, status, kind, due, traces, notes, stored_reason)) = existing {
+                if matches!(
+                    proposal.lifecycle_state.as_str(),
+                    "regression" | "reconsideration"
+                ) {
+                    debug_assert!(matches!(status.as_str(), "implemented" | "rejected"));
+                    let occurrence_kind = proposal.lifecycle_state.as_str();
+                    let new_uid = Self::new_uid(
+                        "blg",
+                        &format!("{key}\0{uid}\0{occurrence_kind}"),
+                    );
+                    let notes = format!(
+                        "component: {}; confidence: {}; validation: {}",
+                        proposal.component, proposal.confidence, proposal.validation_plan
+                    );
+                    if let Some((schedule_kind, schedule_due, schedule_traces)) =
+                        &parsed_schedule
+                    {
+                        transaction.execute(
+                            "INSERT INTO backlog (uid, proposal_key, predecessor_uid, occurrence_kind, title, discovered_while, current_pain, suggested_improvement, risk, status, predicted_impact, notes, accepted_at, outcome_schedule_kind, outcome_due_at, outcome_after_traces, outcome_baseline_trace_count)
+                             VALUES (?1, ?2, ?3, ?4, ?5, 'harness-cli propose', ?6, ?7, ?8, 'accepted', ?9, ?10, datetime('now'), ?11, ?12, ?13, NULL);",
+                            params![new_uid, key, uid, occurrence_kind, proposal.title, proposal.evidence, proposal.suggested_action, normalize_token(&proposal.risk), proposal.predicted_impact, notes, schedule_kind, schedule_due, schedule_traces],
+                        )?;
+                        let new_id = transaction.last_insert_rowid();
+                        record_proposal_evidence(transaction, &new_uid, proposal)?;
+                        let accepted_at: String = transaction.query_row(
+                            "SELECT accepted_at FROM backlog WHERE id=?1",
+                            params![new_id],
+                            |row| row.get(0),
+                        )?;
+                        return Ok((
+                            format!("Accepted {occurrence_kind} proposal {key} as backlog #{new_id}."),
+                            vec![proposal_decision_operation(
+                                &new_uid,
+                                key,
+                                "accepted",
+                                proposal,
+                                Some((schedule_kind, schedule_due.as_deref(), *schedule_traces)),
+                                None,
+                                Some(&accepted_at),
+                                None,
+                                Some(&notes),
+                            )],
+                        ));
+                    }
+                    let reason = rejection_reason.as_ref().expect("decision is reject");
+                    let rejection_notes = format!(
+                        "rejection_reason: {reason}\ncovered_evidence: {}",
+                        proposal.evidence
+                    );
+                    transaction.execute(
+                        "INSERT INTO backlog (uid, proposal_key, predecessor_uid, occurrence_kind, title, discovered_while, current_pain, suggested_improvement, risk, status, predicted_impact, notes, closed_at, rejection_reason)
+                         VALUES (?1, ?2, ?3, ?4, ?5, 'harness-cli propose', ?6, ?7, ?8, 'rejected', ?9, ?10, datetime('now'), ?11);",
+                        params![new_uid, key, uid, occurrence_kind, proposal.title, proposal.evidence, proposal.suggested_action, normalize_token(&proposal.risk), proposal.predicted_impact, rejection_notes, reason],
+                    )?;
+                    let new_id = transaction.last_insert_rowid();
+                    record_proposal_evidence(transaction, &new_uid, proposal)?;
+                    let closed_at: String = transaction.query_row(
+                        "SELECT closed_at FROM backlog WHERE id=?1",
+                        params![new_id],
+                        |row| row.get(0),
+                    )?;
+                    return Ok((
+                        format!("Rejected {occurrence_kind} proposal {key} as backlog #{new_id}."),
+                        vec![proposal_decision_operation(
+                            &new_uid,
+                            key,
+                            "rejected",
+                            proposal,
+                            None,
+                            Some(reason),
+                            None,
+                            Some(&closed_at),
+                            Some(&rejection_notes),
+                        )],
+                    ));
+                }
+                if let Some((requested_kind, requested_due, requested_traces)) = &parsed_schedule {
+                    if status == "accepted" {
+                        if kind.as_deref() == Some(requested_kind.as_str()) && due == *requested_due && traces == *requested_traces {
+                            return Ok((format!("Proposal {key} unchanged: accepted backlog #{id}."), Vec::new()));
+                        }
+                        return Err(HarnessInfraError::ProposalDecision("conflicting observation boundary for existing acceptance".to_owned()));
+                    }
+                    if status != "proposed" {
+                        return Err(HarnessInfraError::ProposalDecision(format!("cannot accept a {status} occurrence")));
+                    }
+                    transaction.execute(
+                        "UPDATE backlog SET status='accepted', accepted_at=datetime('now'), outcome_schedule_kind=?1, outcome_due_at=?2, outcome_after_traces=?3, outcome_baseline_trace_count=NULL WHERE id=?4;",
+                        params![requested_kind, requested_due, requested_traces, id]
+                    )?;
+                    record_proposal_evidence(transaction, &uid, proposal)?;
+                    let accepted_at: String = transaction.query_row("SELECT accepted_at FROM backlog WHERE id=?1", params![id], |row| row.get(0))?;
+                    return Ok((format!("Accepted proposal {key} as backlog #{id}. Next: harness-cli intake --type harness_improvement --summary \"<implementation objective>\" --lane normal --story <US-NNN>"), vec![proposal_decision_operation(&uid, key, "accepted", proposal, Some((requested_kind, requested_due.as_deref(), *requested_traces)), None, Some(&accepted_at), None, notes.as_deref())]));
+                }
+                let reason = rejection_reason.as_ref().expect("decision is reject");
+                if status == "rejected" {
+                    if stored_rejection_reason(stored_reason.as_deref(), notes.as_deref())
+                        == Some(reason.as_str())
+                    {
+                        return Ok((format!("Proposal {key} unchanged: rejected backlog #{id}."), Vec::new()));
+                    }
+                    return Err(HarnessInfraError::ProposalDecision("a rejected occurrence cannot be rewritten with a different reason".to_owned()));
+                }
+                if status == "accepted" {
+                    return Err(HarnessInfraError::ProposalDecision("an accepted occurrence cannot be rejected".to_owned()));
+                }
+                if status != "proposed" {
+                    return Err(HarnessInfraError::ProposalDecision(format!("cannot reject a {status} occurrence")));
+                }
+                let rejection_notes = format!("rejection_reason: {reason}\ncovered_evidence: {}", proposal.evidence);
+                transaction.execute("UPDATE backlog SET status='rejected', closed_at=datetime('now'), notes=?1, rejection_reason=?2 WHERE id=?3;", params![rejection_notes, reason, id])?;
+                record_proposal_evidence(transaction, &uid, proposal)?;
+                let closed_at: String = transaction.query_row("SELECT closed_at FROM backlog WHERE id=?1", params![id], |row| row.get(0))?;
+                return Ok((format!("Rejected proposal {key} as backlog #{id}."), vec![proposal_decision_operation(&uid, key, "rejected", proposal, None, Some(reason), None, Some(&closed_at), Some(&rejection_notes))]));
+            }
+
+            let uid = stable_uid("blg", key);
+            let notes = format!("component: {}; confidence: {}; validation: {}", proposal.component, proposal.confidence, proposal.validation_plan);
+            if let Some((kind, due, traces)) = &parsed_schedule {
+                transaction.execute(
+                    "INSERT INTO backlog (uid, proposal_key, occurrence_kind, title, discovered_while, current_pain, suggested_improvement, risk, status, predicted_impact, notes, accepted_at, outcome_schedule_kind, outcome_due_at, outcome_after_traces, outcome_baseline_trace_count)
+                     VALUES (?1, ?2, 'original', ?3, 'harness-cli propose', ?4, ?5, ?6, 'accepted', ?7, ?8, datetime('now'), ?9, ?10, ?11, NULL);",
+                    params![uid, key, proposal.title, proposal.evidence, proposal.suggested_action, normalize_token(&proposal.risk), proposal.predicted_impact, notes, kind, due, traces]
+                )?;
+                let id = transaction.last_insert_rowid();
+                record_proposal_evidence(transaction, &uid, proposal)?;
+                let accepted_at: String = transaction.query_row("SELECT accepted_at FROM backlog WHERE id=?1", params![id], |row| row.get(0))?;
+                return Ok((format!("Accepted proposal {key} as backlog #{id}. Next: harness-cli intake --type harness_improvement --summary \"<implementation objective>\" --lane normal --story <US-NNN>"), vec![proposal_decision_operation(&uid, key, "accepted", proposal, Some((kind, due.as_deref(), *traces)), None, Some(&accepted_at), None, Some(&notes))]));
+            }
+            let reason = rejection_reason.as_ref().expect("decision is reject");
+            let rejection_notes = format!("rejection_reason: {reason}\ncovered_evidence: {}", proposal.evidence);
+            transaction.execute(
+                "INSERT INTO backlog (uid, proposal_key, occurrence_kind, title, discovered_while, current_pain, suggested_improvement, risk, status, predicted_impact, notes, closed_at, rejection_reason)
+                 VALUES (?1, ?2, 'original', ?3, 'harness-cli propose', ?4, ?5, ?6, 'rejected', ?7, ?8, datetime('now'), ?9);",
+                params![uid, key, proposal.title, proposal.evidence, proposal.suggested_action, normalize_token(&proposal.risk), proposal.predicted_impact, rejection_notes, reason]
+            )?;
+            let id = transaction.last_insert_rowid();
+            record_proposal_evidence(transaction, &uid, proposal)?;
+            let closed_at: String = transaction.query_row("SELECT closed_at FROM backlog WHERE id=?1", params![id], |row| row.get(0))?;
+            Ok((format!("Rejected proposal {key} as backlog #{id}."), vec![proposal_decision_operation(&uid, key, "rejected", proposal, None, Some(reason), None, Some(&closed_at), Some(&rejection_notes))]))
+        })
     }
 
     fn open_existing(&self) -> Result<Connection> {
@@ -154,12 +524,14 @@ impl SqliteHarnessRepository {
         }
 
         let connection = Connection::open(&self.db_path)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         Ok(connection)
     }
 
     fn open_or_create(&self) -> Result<Connection> {
         let connection = Connection::open(&self.db_path)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         Ok(connection)
     }
@@ -247,7 +619,7 @@ impl SqliteHarnessRepository {
         connection: &mut Connection,
         write: impl FnOnce(&Transaction<'_>) -> Result<(T, Vec<Value>)>,
     ) -> Result<T> {
-        let run_id = Self::run_id();
+        let run_id = self.run_id_override.clone().or_else(Self::run_id);
         self.with_logged_write_for_run(connection, run_id.as_deref(), write)
     }
 
@@ -257,7 +629,7 @@ impl SqliteHarnessRepository {
         run_id: Option<&str>,
         write: impl FnOnce(&Transaction<'_>) -> Result<(T, Vec<Value>)>,
     ) -> Result<T> {
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (result, operations) = write(&transaction)?;
         let append = if let Some(run_id) = run_id {
             self.append_changeset_operations(&transaction, run_id, operations)?
@@ -578,11 +950,16 @@ impl HarnessRepository for SqliteHarnessRepository {
             let risk_lane = input.risk_lane.as_db_value().to_owned();
             let risk_flags = input.risk_flags.as_json_text();
             let affected_docs = input.affected_docs.as_json_text();
+            let uid = Self::new_uid(
+                "ink",
+                &format!("{input_type}\0{}\0{risk_lane}", input.summary),
+            );
             transaction.execute(
                 "INSERT INTO intake (
-                    input_type, summary, risk_lane, risk_flags, affected_docs, story_id, notes
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
+                    uid, input_type, summary, risk_lane, risk_flags, affected_docs, story_id, notes
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);",
                 params![
+                    uid,
                     input_type,
                     input.summary,
                     risk_lane,
@@ -594,13 +971,19 @@ impl HarnessRepository for SqliteHarnessRepository {
             )?;
 
             let id = transaction.last_insert_rowid();
+            let created_at: String = transaction.query_row(
+                "SELECT created_at FROM intake WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )?;
             Ok((
                 id,
                 vec![json!({
                     "op": "intake.add",
-                    "version": 1,
-                    "id": id,
+                    "version": 2,
+                    "uid": uid,
                     "payload": {
+                        "created_at": created_at,
                         "input_type": input_type,
                         "summary": input.summary,
                         "risk_lane": risk_lane,
@@ -610,6 +993,230 @@ impl HarnessRepository for SqliteHarnessRepository {
                         "notes": input.notes,
                     },
                 })],
+            ))
+        })
+    }
+
+    fn reconcile_legacy_improvements(&self, apply: bool) -> Result<LegacyReconcileResult> {
+        let proposals = self.propose(ProposalDecision::PreviewSuppressed)?.proposals;
+        let mut connection = self.open_existing()?;
+        let candidates = legacy_reconcile_candidates(&connection, &proposals)?;
+        let changed = candidates
+            .iter()
+            .filter(|candidate| candidate.backlog_uid.is_some())
+            .count();
+        let records = candidates
+            .iter()
+            .map(|candidate| candidate.record.clone())
+            .collect::<Vec<_>>();
+
+        if !apply {
+            return Ok(LegacyReconcileResult {
+                applied: false,
+                changed,
+                trace_id: None,
+                records,
+            });
+        }
+
+        self.with_logged_write(&mut connection, |transaction| {
+            let captured_at: String =
+                transaction.query_row("SELECT datetime('now');", [], |row| row.get(0))?;
+            let mut operations = Vec::new();
+            let mut applied = 0usize;
+
+            for candidate in &candidates {
+                let Some(backlog_uid) = candidate.backlog_uid.as_deref() else {
+                    continue;
+                };
+                let proposal_key = candidate
+                    .record
+                    .proposal_key
+                    .as_deref()
+                    .expect("derivable candidate has proposal key");
+                let updated = transaction.execute(
+                    "UPDATE backlog
+                     SET uid=?1, proposal_key=?2, occurrence_kind='original'
+                     WHERE id=?3 AND uid IS NULL AND proposal_key IS NULL
+                       AND occurrence_kind IS NULL;",
+                    params![backlog_uid, proposal_key, candidate.row.id],
+                )?;
+                if updated != 1 {
+                    return Err(HarnessInfraError::LegacyReconciliation(format!(
+                        "backlog #{} changed after classification; retry reconciliation",
+                        candidate.row.id
+                    )));
+                }
+
+                let mut evidence_operations = Vec::new();
+                for (evidence, capture) in &candidate.evidence {
+                    let (source_kind, evidence_uid, evidence_fingerprint, observed_at) =
+                        if let Some(capture) = capture {
+                            transaction.execute(
+                                "INSERT INTO legacy_evidence_snapshot
+                                    (uid, source_kind, source_local_id, evidence_fingerprint,
+                                     canonical_payload, captured_at)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                                 ON CONFLICT(source_kind, evidence_fingerprint) DO NOTHING;",
+                                params![
+                                    capture.uid,
+                                    capture.source_kind,
+                                    capture.source_local_id,
+                                    capture.fingerprint,
+                                    capture.canonical_payload,
+                                    captured_at,
+                                ],
+                            )?;
+                            let snapshot: (String, String) = transaction.query_row(
+                                "SELECT uid, captured_at FROM legacy_evidence_snapshot
+                                 WHERE source_kind=?1 AND evidence_fingerprint=?2;",
+                                params![capture.source_kind, capture.fingerprint],
+                                |row| Ok((row.get(0)?, row.get(1)?)),
+                            )?;
+                            operations.push(json!({
+                                "op": "legacy.evidence.capture",
+                                "version": 1,
+                                "uid": snapshot.0,
+                                "payload": {
+                                    "source_kind": capture.source_kind,
+                                    "source_local_id": capture.source_local_id,
+                                    "evidence_fingerprint": capture.fingerprint,
+                                    "canonical_payload": capture.canonical_payload,
+                                    "captured_at": snapshot.1,
+                                }
+                            }));
+                            (
+                                "legacy_snapshot".to_owned(),
+                                snapshot.0,
+                                capture.fingerprint.clone(),
+                                evidence.observed_at.clone(),
+                            )
+                        } else {
+                            (
+                                evidence.source_kind.clone(),
+                                evidence.uid.clone(),
+                                evidence.fingerprint.clone(),
+                                evidence.observed_at.clone(),
+                            )
+                        };
+                    transaction.execute(
+                        "INSERT OR IGNORE INTO proposal_evidence_link
+                            (backlog_uid, source_kind, evidence_uid, evidence_fingerprint, observed_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5);",
+                        params![
+                            backlog_uid,
+                            source_kind,
+                            evidence_uid,
+                            evidence_fingerprint,
+                            observed_at
+                        ],
+                    )?;
+                    evidence_operations.push(json!({
+                        "source_kind": source_kind,
+                        "evidence_uid": evidence_uid,
+                        "evidence_fingerprint": evidence_fingerprint,
+                        "observed_at": observed_at,
+                    }));
+                }
+
+                operations.push(json!({
+                    "op": "backlog.legacy.reconcile",
+                    "version": 1,
+                    "uid": backlog_uid,
+                    "payload": {
+                        "title": candidate.row.title,
+                        "legacy_row": candidate.row.legacy_payload,
+                        "proposal_key": proposal_key,
+                        "occurrence_kind": "original",
+                        "evidence": evidence_operations,
+                    }
+                }));
+
+                if matches!(candidate.row.status.as_str(), "implemented" | "rejected") {
+                    if let Some(outcome) = candidate
+                        .row
+                        .actual_outcome
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                    {
+                        let observation_uid = stable_uid("obs", &format!("{backlog_uid}\0legacy"));
+                        transaction.execute(
+                            "INSERT OR IGNORE INTO backlog_outcome_observation
+                                (uid, backlog_uid, ordinal, status, outcome, evidence, observed_at)
+                             VALUES (?1, ?2, 1, 'legacy_recorded', ?3,
+                                     'migrated from backlog.actual_outcome', ?4);",
+                            params![observation_uid, backlog_uid, outcome, captured_at],
+                        )?;
+                        operations.push(json!({
+                            "op": "backlog.outcome.observe",
+                            "version": 1,
+                            "uid": observation_uid,
+                            "payload": {
+                                "backlog_uid": backlog_uid,
+                                "ordinal": 1,
+                                "status": "legacy_recorded",
+                                "outcome": outcome,
+                                "evidence": "migrated from backlog.actual_outcome",
+                                "observed_at": captured_at,
+                            }
+                        }));
+                    }
+                }
+                applied += 1;
+            }
+
+            let trace_id = if applied == 0 {
+                None
+            } else {
+                let trace_uid = Self::new_uid("trc", "legacy improvement reconciliation");
+                transaction.execute(
+                    "INSERT INTO trace
+                        (uid, created_at, task_summary, agent, actions_taken, files_changed,
+                         outcome, notes)
+                     VALUES (?1, ?2, ?3, 'harness-cli', ?4, ?5, 'completed', ?6);",
+                    params![
+                        trace_uid,
+                        captured_at,
+                        format!("Reconciled {applied} legacy improvement row(s)"),
+                        json!(["classified legacy improvements", "backfilled derivable lifecycle identity", "captured immutable legacy evidence"]).to_string(),
+                        json!(["harness durable legacy lifecycle metadata"]).to_string(),
+                        "Manual, ambiguous, and duplicate-candidate rows were left unchanged.",
+                    ],
+                )?;
+                let id = transaction.last_insert_rowid();
+                operations.push(json!({
+                    "op": "trace.add",
+                    "version": 2,
+                    "uid": trace_uid,
+                    "payload": {
+                        "created_at": captured_at,
+                        "task_summary": format!("Reconciled {applied} legacy improvement row(s)"),
+                        "intake_uid": null,
+                        "story_id": null,
+                        "agent": "harness-cli",
+                        "actions_taken": json!(["classified legacy improvements", "backfilled derivable lifecycle identity", "captured immutable legacy evidence"]).to_string(),
+                        "files_read": null,
+                        "files_changed": json!(["harness durable legacy lifecycle metadata"]).to_string(),
+                        "decisions_made": null,
+                        "errors": null,
+                        "outcome": "completed",
+                        "duration_seconds": null,
+                        "token_estimate": null,
+                        "harness_friction": null,
+                        "notes": "Manual, ambiguous, and duplicate-candidate rows were left unchanged.",
+                    }
+                }));
+                Some(id)
+            };
+
+            Ok((
+                LegacyReconcileResult {
+                    applied: true,
+                    changed: applied,
+                    trace_id,
+                    records,
+                },
+                operations,
             ))
         })
     }
@@ -711,6 +1318,134 @@ impl HarnessRepository for SqliteHarnessRepository {
         })
     }
 
+    fn add_story_dependency(&self, input: StoryDependencyInput) -> Result<bool> {
+        if input.blocker == input.blocked {
+            return Err(HarnessInfraError::StoryDependencySelf(input.blocker));
+        }
+
+        let mut connection = self.open_existing()?;
+        self.with_logged_write(&mut connection, |transaction| {
+            ensure_story_exists(transaction, &input.blocker)?;
+            ensure_story_exists(transaction, &input.blocked)?;
+            if dependency_path_exists(transaction, &input.blocked, &input.blocker)? {
+                return Err(HarnessInfraError::StoryDependencyCycle(
+                    input.blocker,
+                    input.blocked,
+                ));
+            }
+            let changed = transaction.execute(
+                "INSERT INTO story_dependency (story_id, blocks_story_id) VALUES (?1, ?2)
+                 ON CONFLICT(story_id, blocks_story_id) DO NOTHING;",
+                params![input.blocker, input.blocked],
+            )? > 0;
+            let operations = if changed {
+                vec![json!({
+                    "op": "story.dependency.add",
+                    "version": 1,
+                    "id": input.blocker,
+                    "payload": { "blocked": input.blocked },
+                })]
+            } else {
+                Vec::new()
+            };
+            Ok((changed, operations))
+        })
+    }
+
+    fn remove_story_dependency(&self, input: StoryDependencyInput) -> Result<bool> {
+        let mut connection = self.open_existing()?;
+        self.with_logged_write(&mut connection, |transaction| {
+            let changed = transaction.execute(
+                "DELETE FROM story_dependency WHERE story_id=?1 AND blocks_story_id=?2;",
+                params![input.blocker, input.blocked],
+            )? > 0;
+            let operations = if changed {
+                vec![json!({
+                    "op": "story.dependency.remove",
+                    "version": 1,
+                    "id": input.blocker,
+                    "payload": { "blocked": input.blocked },
+                })]
+            } else {
+                Vec::new()
+            };
+            Ok((changed, operations))
+        })
+    }
+
+    fn query_story_dependencies(&self, story: Option<&str>) -> Result<Vec<StoryDependencyRecord>> {
+        let connection = self.open_existing()?;
+        let mut statement = connection.prepare(
+            "SELECT story_id, blocks_story_id FROM story_dependency
+             WHERE (?1 IS NULL OR story_id=?1 OR blocks_story_id=?1)
+             ORDER BY story_id, blocks_story_id;",
+        )?;
+        let rows = statement.query_map(params![story], |row| {
+            Ok(StoryDependencyRecord {
+                blocker: row.get(0)?,
+                blocked: row.get(1)?,
+            })
+        })?;
+        collect_rows(rows)
+    }
+
+    fn link_story_backlog(&self, input: StoryBacklogLinkInput) -> Result<bool> {
+        if !matches!(input.relationship.as_str(), "resolves" | "references") {
+            return Err(HarnessInfraError::StoryBacklogRelationship);
+        }
+        let mut connection = self.open_existing()?;
+        self.with_logged_write(&mut connection, |transaction| {
+            let (backlog_uid, backlog_status) = linked_backlog(transaction, input.backlog_id)?;
+            let story_status: String = transaction.query_row("SELECT status FROM story WHERE id=?1;", params![input.story_id], |row| row.get(0)).optional()?.ok_or_else(|| HarnessInfraError::StoryNotFound(input.story_id.clone()))?;
+            let previous: Option<String> = transaction.query_row("SELECT relationship FROM story_backlog_link WHERE story_id=?1 AND backlog_uid=?2;", params![input.story_id, backlog_uid], |row| row.get(0)).optional()?;
+            if previous.as_deref() == Some(&input.relationship) { return Ok((false, Vec::new())); }
+            if input.relationship == "resolves" || previous.as_deref() == Some("resolves") {
+                validate_resolver_mutation(transaction, &input.story_id, input.backlog_id, &backlog_status, &story_status, &backlog_uid)?;
+            }
+            let linked_at: String = transaction.query_row("SELECT datetime('now')", [], |row| row.get(0))?;
+            let linked_at_unix_ns = Self::unix_time_nanos();
+            transaction.execute("INSERT INTO story_backlog_link (story_id, backlog_uid, relationship, linked_at, linked_at_unix_ns) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(story_id, backlog_uid) DO UPDATE SET relationship=excluded.relationship, linked_at=excluded.linked_at, linked_at_unix_ns=excluded.linked_at_unix_ns;", params![input.story_id, backlog_uid, input.relationship, linked_at, linked_at_unix_ns])?;
+            if input.relationship == "resolves" || previous.as_deref() == Some("resolves") {
+                transaction.execute("UPDATE story SET last_verified_at=NULL, last_verified_result=NULL WHERE id=?1;", params![input.story_id])?;
+            }
+            Ok((true, vec![json!({"op":"story.backlog.link","version":2,"id":input.story_id,"payload":{"backlog_uid":backlog_uid,"relationship":input.relationship,"linked_at":linked_at,"linked_at_unix_ns":linked_at_unix_ns}})]))
+        })
+    }
+
+    fn unlink_story_backlog(&self, story_id: &str, backlog_id: i64) -> Result<bool> {
+        let mut connection = self.open_existing()?;
+        self.with_logged_write(&mut connection, |transaction| {
+            let (backlog_uid, backlog_status) = linked_backlog(transaction, backlog_id)?;
+            let relationship: Option<String> = transaction.query_row("SELECT relationship FROM story_backlog_link WHERE story_id=?1 AND backlog_uid=?2;", params![story_id, backlog_uid], |row| row.get(0)).optional()?;
+            let Some(relationship) = relationship else { return Ok((false, Vec::new())); };
+            if relationship == "resolves" {
+                let story_status: String = transaction.query_row("SELECT status FROM story WHERE id=?1;", params![story_id], |row| row.get(0)).optional()?.ok_or_else(|| HarnessInfraError::StoryNotFound(story_id.to_owned()))?;
+                validate_resolver_mutation(transaction, story_id, backlog_id, &backlog_status, &story_status, &backlog_uid)?;
+            }
+            transaction.execute("DELETE FROM story_backlog_link WHERE story_id=?1 AND backlog_uid=?2;", params![story_id, backlog_uid])?;
+            if relationship == "resolves" { transaction.execute("UPDATE story SET last_verified_at=NULL, last_verified_result=NULL WHERE id=?1;", params![story_id])?; }
+            Ok((true, vec![json!({"op":"story.backlog.unlink","version":1,"id":story_id,"payload":{"backlog_uid":backlog_uid}})]))
+        })
+    }
+
+    fn query_story_backlog_links(
+        &self,
+        story: Option<&str>,
+        backlog_id: Option<i64>,
+    ) -> Result<Vec<StoryBacklogLinkRecord>> {
+        let connection = self.open_existing()?;
+        let mut statement = connection.prepare("SELECT link.story_id, backlog.id, link.backlog_uid, link.relationship FROM story_backlog_link AS link JOIN backlog ON backlog.uid=link.backlog_uid WHERE (?1 IS NULL OR link.story_id=?1) AND (?2 IS NULL OR backlog.id=?2) ORDER BY backlog.id, link.relationship, link.story_id;")?;
+        let rows = statement.query_map(params![story, backlog_id], |row| {
+            Ok(StoryBacklogLinkRecord {
+                story_id: row.get(0)?,
+                backlog_id: row.get(1)?,
+                backlog_uid: row.get(2)?,
+                relationship: row.get(3)?,
+            })
+        })?;
+        collect_rows(rows)
+    }
+
     fn verify_story(&self, id: &str) -> Result<StoryVerifyResult> {
         let mut connection = self.open_existing()?;
         let verify_command = connection
@@ -724,12 +1459,7 @@ impl HarnessRepository for SqliteHarnessRepository {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| HarnessInfraError::MissingStoryVerifyCommand(id.to_owned()))?;
 
-        let (shell, flag) = verifier_shell();
-        let output = Command::new(shell)
-            .arg(flag)
-            .arg(&verify_command)
-            .current_dir(&self.repo_root)
-            .output()?;
+        let output = self.verification_output(&verify_command)?;
         let result = if output.status.success() {
             "pass"
         } else {
@@ -737,20 +1467,23 @@ impl HarnessRepository for SqliteHarnessRepository {
         }
         .to_owned();
         self.with_logged_write(&mut connection, |transaction| {
+            let verified_at: String =
+                transaction.query_row("SELECT datetime('now')", [], |row| row.get(0))?;
             transaction.execute(
                 "UPDATE story
-                 SET last_verified_at=datetime('now'), last_verified_result=?1
-                 WHERE id=?2;",
-                params![result, id],
+                 SET last_verified_at=?1, last_verified_result=?2
+                 WHERE id=?3;",
+                params![verified_at, result, id],
             )?;
             Ok((
                 (),
                 vec![json!({
                     "op": "story.verify",
-                    "version": 1,
+                    "version": 2,
                     "id": id,
                     "payload": {
                         "result": result,
+                        "verified_at": verified_at,
                     },
                 })],
             ))
@@ -761,6 +1494,143 @@ impl HarnessRepository for SqliteHarnessRepository {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             result,
+        })
+    }
+
+    fn complete_story(&self, id: &str) -> Result<StoryCompleteResult> {
+        let mut connection = self.open_existing()?;
+        let (status, verify_command): (String, Option<String>) = connection
+            .query_row(
+                "SELECT status, verify_command FROM story WHERE id=?1;",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| HarnessInfraError::StoryNotFound(id.to_owned()))?;
+        if status == "implemented" {
+            let (_, already_closed_backlog_ids, referenced_backlog_ids) =
+                story_completion_links(&connection, id)?;
+            return Ok(StoryCompleteResult {
+                command: verify_command.unwrap_or_default(),
+                stdout: String::new(),
+                stderr: String::new(),
+                result: "already-completed".to_owned(),
+                intake_uid: None,
+                implementation_trace_uid: None,
+                closed_backlog_ids: vec![],
+                already_closed_backlog_ids,
+                referenced_backlog_ids,
+            });
+        }
+        if !matches!(status.as_str(), "in_progress" | "changed") {
+            return Err(HarnessInfraError::StoryCompletion(format!("story '{id}' has status '{status}'; move it to in_progress or changed before completion")));
+        }
+        let verify_command = verify_command
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| HarnessInfraError::MissingStoryVerifyCommand(id.to_owned()))?;
+        let context = story_completion_context(&connection, id)?;
+        let (_, already_closed_backlog_ids, referenced_backlog_ids) =
+            story_completion_links(&connection, id)?;
+        let output = self.verification_output(&verify_command)?;
+        let result = if output.status.success() {
+            "pass"
+        } else {
+            "fail"
+        }
+        .to_owned();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if result == "fail" {
+            let already_completed = self.with_logged_write(&mut connection, |tx| {
+                let current_status: String = tx.query_row(
+                    "SELECT status FROM story WHERE id=?1;",
+                    params![id],
+                    |row| row.get(0),
+                )?;
+                if current_status == "implemented" {
+                    return Ok((true, Vec::new()));
+                }
+                let verified_at: String =
+                    tx.query_row("SELECT datetime('now')", [], |row| row.get(0))?;
+                tx.execute("UPDATE story SET last_verified_at=?1, last_verified_result='fail' WHERE id=?2", params![verified_at, id])?;
+                Ok((false, vec![json!({"op":"story.verify","version":2,"id":id,"payload":{"result":"fail","verified_at":verified_at}})]))
+            })?;
+            return Ok(StoryCompleteResult {
+                command: verify_command,
+                stdout,
+                stderr,
+                result: if already_completed {
+                    "already-completed".to_owned()
+                } else {
+                    result
+                },
+                intake_uid: context.intake_uid,
+                implementation_trace_uid: context.trace_uid,
+                closed_backlog_ids: vec![],
+                already_closed_backlog_ids,
+                referenced_backlog_ids,
+            });
+        }
+        let completion = self.with_logged_write(&mut connection, |tx| {
+            let current_status: String = tx.query_row(
+                "SELECT status FROM story WHERE id=?1;",
+                params![id],
+                |row| row.get(0),
+            )?;
+            if current_status == "implemented" {
+                let (_, already_closed_backlog_ids, referenced_backlog_ids) =
+                    story_completion_links(tx, id)?;
+                return Ok((
+                    StoryCompletionWrite {
+                        already_completed: true,
+                        context: StoryCompletionContext::default(),
+                        closed_backlog_ids: Vec::new(),
+                        already_closed_backlog_ids,
+                        referenced_backlog_ids,
+                    },
+                    Vec::new(),
+                ));
+            }
+            if !matches!(current_status.as_str(), "in_progress" | "changed") {
+                return Err(HarnessInfraError::StoryCompletion(format!("story '{id}' changed to status '{current_status}' before completion commit")));
+            }
+            let context = story_completion_context(tx, id)?;
+            let (rows, already_closed_backlog_ids, referenced_backlog_ids) =
+                story_completion_links(tx, id)?;
+            let trace_count: i64 = tx.query_row("SELECT COUNT(*) FROM trace WHERE uid IS NOT NULL", [], |row| row.get(0))?;
+            let completed_at: String = tx.query_row("SELECT datetime('now');", [], |row| row.get(0))?;
+            let completion_uid = Self::new_uid("cmp", &format!("{id}\0{completed_at}"));
+            tx.execute("UPDATE story SET status='implemented', last_verified_at=?1, last_verified_result='pass' WHERE id=?2", params![completed_at, id])?;
+            let mut operations = vec![json!({"op":"story.complete","version":2,"id":id,"payload":{"result":"pass","completion_uid":completion_uid,"completed_at":completed_at}})];
+            let mut closed_backlog_ids = Vec::new();
+            for (backlog_id, uid, schedule) in &rows {
+                let evidence = json!({"story_id":id,"verify_command":verify_command,"result":"pass","completion_uid":completion_uid,"completed_at":completed_at}).to_string();
+                tx.execute("UPDATE backlog SET status='implemented', implemented_at=?1, closed_at=?1, resolution_evidence=?2, outcome_baseline_trace_count=CASE WHEN ?3='trace_count' THEN ?4 ELSE outcome_baseline_trace_count END WHERE uid=?5", params![completed_at, evidence, schedule, trace_count, uid])?;
+                operations.push(json!({"op":"backlog.complete","version":2,"uid":uid,"payload":{"story_id":id,"trace_baseline":trace_count,"resolution_evidence":evidence,"completed_at":completed_at}}));
+                closed_backlog_ids.push(*backlog_id);
+            }
+            Ok((StoryCompletionWrite {
+                already_completed: false,
+                context,
+                closed_backlog_ids,
+                already_closed_backlog_ids,
+                referenced_backlog_ids,
+            }, operations))
+        })?;
+        Ok(StoryCompleteResult {
+            command: verify_command,
+            stdout,
+            stderr,
+            result: if completion.already_completed {
+                "already-completed".to_owned()
+            } else {
+                result
+            },
+            intake_uid: completion.context.intake_uid,
+            implementation_trace_uid: completion.context.trace_uid,
+            closed_backlog_ids: completion.closed_backlog_ids,
+            already_closed_backlog_ids: completion.already_closed_backlog_ids,
+            referenced_backlog_ids: completion.referenced_backlog_ids,
         })
     }
 
@@ -792,12 +1662,7 @@ impl HarnessRepository for SqliteHarnessRepository {
                 continue;
             };
 
-            let (shell, flag) = verifier_shell();
-            let output = Command::new(shell)
-                .arg(flag)
-                .arg(&command)
-                .current_dir(&self.repo_root)
-                .output()?;
+            let output = self.verification_output(&command)?;
             let result = if output.status.success() {
                 "pass"
             } else {
@@ -805,20 +1670,23 @@ impl HarnessRepository for SqliteHarnessRepository {
             }
             .to_owned();
             self.with_logged_write(&mut connection, |transaction| {
+                let verified_at: String =
+                    transaction.query_row("SELECT datetime('now')", [], |row| row.get(0))?;
                 transaction.execute(
                     "UPDATE story
-                     SET last_verified_at=datetime('now'), last_verified_result=?1
-                     WHERE id=?2;",
-                    params![result, id],
+                     SET last_verified_at=?1, last_verified_result=?2
+                     WHERE id=?3;",
+                    params![verified_at, result, id],
                 )?;
                 Ok((
                     (),
                     vec![json!({
                         "op": "story.verify",
-                        "version": 1,
+                        "version": 2,
                         "id": id,
                         "payload": {
                             "result": result,
+                            "verified_at": verified_at,
                         },
                     })],
                 ))
@@ -921,12 +1789,21 @@ impl HarnessRepository for SqliteHarnessRepository {
         let mut connection = self.open_existing()?;
         self.with_logged_write(&mut connection, |transaction| {
             let risk = input.risk.map(|value| value.as_db_value().to_owned());
+            let uid = Self::new_uid(
+                "blg",
+                &format!(
+                    "{}\0{}",
+                    input.title,
+                    input.discovered_while.as_deref().unwrap_or_default()
+                ),
+            );
             transaction.execute(
                 "INSERT INTO backlog (
-                    title, discovered_while, current_pain, suggested_improvement,
+                    uid, title, discovered_while, current_pain, suggested_improvement,
                     risk, predicted_impact, notes
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);",
                 params![
+                    uid,
                     input.title,
                     input.discovered_while,
                     input.current_pain,
@@ -937,13 +1814,19 @@ impl HarnessRepository for SqliteHarnessRepository {
                 ],
             )?;
             let id = transaction.last_insert_rowid();
+            let created_at: String = transaction.query_row(
+                "SELECT created_at FROM backlog WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )?;
             Ok((
                 id,
                 vec![json!({
                     "op": "backlog.add",
-                    "version": 1,
-                    "id": id,
+                    "version": 2,
+                    "uid": uid,
                     "payload": {
+                        "created_at": created_at,
                         "title": input.title,
                         "discovered_while": input.discovered_while,
                         "current_pain": input.current_pain,
@@ -960,6 +1843,18 @@ impl HarnessRepository for SqliteHarnessRepository {
     fn close_backlog(&self, input: BacklogCloseInput) -> Result<()> {
         let mut connection = self.open_existing()?;
         self.with_logged_write(&mut connection, |transaction| {
+            let keyed: Option<Option<String>> = transaction
+                .query_row(
+                    "SELECT proposal_key FROM backlog WHERE id=?1;",
+                    params![input.id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if keyed.flatten().is_some()
+                && matches!(input.status.as_str(), "implemented" | "rejected")
+            {
+                return Err(HarnessInfraError::KeyedBacklogClose(input.id));
+            }
             transaction.execute(
                 "UPDATE backlog
                  SET status=?1, actual_outcome=?2, implemented_at=datetime('now')
@@ -980,6 +1875,82 @@ impl HarnessRepository for SqliteHarnessRepository {
                         "status": input.status,
                         "actual_outcome": input.actual_outcome,
                     },
+                })],
+            ))
+        })
+    }
+
+    fn record_backlog_outcome(
+        &self,
+        input: BacklogOutcomeInput,
+    ) -> Result<OutcomeObservationRecord> {
+        if !matches!(
+            input.status.as_str(),
+            "confirmed" | "ineffective" | "reverted"
+        ) {
+            return Err(HarnessInfraError::BacklogOutcomeStatus);
+        }
+        if input.outcome.trim().is_empty() {
+            return Err(HarnessInfraError::ProposalDecision(
+                "outcome observation text must not be empty".to_owned(),
+            ));
+        }
+
+        let mut connection = self.open_existing()?;
+        self.with_logged_write(&mut connection, |transaction| {
+            let occurrence: Option<(Option<String>, Option<String>, String)> = transaction
+                .query_row(
+                    "SELECT uid, proposal_key, status FROM backlog WHERE id=?1;",
+                    params![input.id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let Some((Some(backlog_uid), Some(_), status)) = occurrence else {
+                return Err(HarnessInfraError::BacklogOutcomeNotImplemented(input.id));
+            };
+            if status != "implemented" {
+                return Err(HarnessInfraError::BacklogOutcomeNotImplemented(input.id));
+            }
+
+            let ordinal: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM backlog_outcome_observation WHERE backlog_uid=?1;",
+                params![backlog_uid],
+                |row| row.get(0),
+            )?;
+            let uid = Self::new_uid("obs", &format!("{}\0{}", backlog_uid, ordinal));
+            transaction.execute(
+                "INSERT INTO backlog_outcome_observation
+                    (uid, backlog_uid, ordinal, status, outcome, evidence, observed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'));",
+                params![uid, backlog_uid, ordinal, input.status, input.outcome, input.evidence],
+            )?;
+            let observed_at: String = transaction.query_row(
+                "SELECT observed_at FROM backlog_outcome_observation WHERE uid=?1;",
+                params![uid],
+                |row| row.get(0),
+            )?;
+            let record = OutcomeObservationRecord {
+                backlog_id: input.id,
+                ordinal,
+                status: input.status.clone(),
+                outcome: input.outcome.clone(),
+                evidence: input.evidence.clone(),
+                observed_at: observed_at.clone(),
+            };
+            Ok((
+                record,
+                vec![json!({
+                    "op": "backlog.outcome.observe",
+                    "version": 1,
+                    "uid": uid,
+                    "payload": {
+                        "backlog_uid": backlog_uid,
+                        "ordinal": ordinal,
+                        "status": input.status,
+                        "outcome": input.outcome,
+                        "evidence": input.evidence,
+                        "observed_at": observed_at,
+                    }
                 })],
             ))
         })
@@ -1119,10 +2090,14 @@ impl HarnessRepository for SqliteHarnessRepository {
     fn add_intervention(&self, input: InterventionAddInput) -> Result<i64> {
         let mut connection = self.open_existing()?;
         self.with_logged_write(&mut connection, |transaction| {
+            let uid = Self::new_uid("int", &format!("{}\0{}", input.intervention_type, input.description));
+            let trace_uid: Option<String> = input.trace_id.and_then(|trace_id| transaction
+                .query_row("SELECT uid FROM trace WHERE id=?1", params![trace_id], |row| row.get(0)).optional().ok().flatten());
             transaction.execute(
-                "INSERT INTO intervention (trace_id, story_id, type, description, source, impact)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
+                "INSERT INTO intervention (uid, trace_id, story_id, type, description, source, impact)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
                 params![
+                    uid,
                     input.trace_id,
                     input.story_id,
                     input.intervention_type,
@@ -1132,14 +2107,17 @@ impl HarnessRepository for SqliteHarnessRepository {
                 ],
             )?;
             let id = transaction.last_insert_rowid();
+            let created_at: String = transaction.query_row(
+                "SELECT created_at FROM intervention WHERE id=?1", params![id], |row| row.get(0))?;
             Ok((
                 id,
                 vec![json!({
                     "op": "intervention.add",
-                    "version": 1,
-                    "id": id,
+                    "version": 2,
+                    "uid": uid,
                     "payload": {
-                        "trace_id": input.trace_id,
+                        "created_at": created_at,
+                        "trace_uid": trace_uid,
                         "story_id": input.story_id,
                         "type": input.intervention_type,
                         "description": input.description,
@@ -1159,13 +2137,36 @@ impl HarnessRepository for SqliteHarnessRepository {
             let files_changed = input.files_changed.as_json_text();
             let decisions = input.decisions.as_json_text();
             let errors = input.errors.as_json_text();
+            let recorded_at_unix_ns = Self::unix_time_nanos();
+            let uid = Self::new_uid(
+                "trc",
+                &format!(
+                    "{}\0{}",
+                    input.task_summary,
+                    input.story_id.as_deref().unwrap_or_default()
+                ),
+            );
+            let intake_uid: Option<String> = input.intake_id.and_then(|intake_id| {
+                transaction
+                    .query_row(
+                        "SELECT uid FROM intake WHERE id=?1",
+                        params![intake_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .ok()
+                    .flatten()
+            });
             transaction.execute(
                 "INSERT INTO trace (
-                    task_summary, intake_id, story_id, agent,
+                    uid, intake_uid, recorded_at_unix_ns, task_summary, intake_id, story_id, agent,
                     actions_taken, files_read, files_changed, decisions_made, errors,
                     outcome, duration_seconds, token_estimate, harness_friction, notes
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14);",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17);",
                 params![
+                    uid,
+                    intake_uid,
+                    recorded_at_unix_ns,
                     input.task_summary,
                     input.intake_id,
                     input.story_id,
@@ -1183,15 +2184,22 @@ impl HarnessRepository for SqliteHarnessRepository {
                 ],
             )?;
             let id = transaction.last_insert_rowid();
+            let created_at: String = transaction.query_row(
+                "SELECT created_at FROM trace WHERE id=?1",
+                params![id],
+                |row| row.get(0),
+            )?;
             Ok((
                 id,
                 vec![json!({
                     "op": "trace.add",
-                    "version": 1,
-                    "id": id,
+                    "version": 2,
+                    "uid": uid,
                     "payload": {
+                        "created_at": created_at,
+                        "recorded_at_unix_ns": recorded_at_unix_ns,
                         "task_summary": input.task_summary,
-                        "intake_id": input.intake_id,
+                        "intake_uid": intake_uid,
                         "story_id": input.story_id,
                         "agent": input.agent,
                         "actions_taken": actions,
@@ -1560,6 +2568,269 @@ impl HarnessRepository for SqliteHarnessRepository {
             .map_err(HarnessInfraError::from)
     }
 
+    fn query_improvement_health(&self) -> Result<ImprovementHealthResult> {
+        let audit = self.audit()?;
+        let proposals = self.propose(ProposalDecision::PreviewSuppressed)?.proposals;
+        let connection = self.open_existing()?;
+        let actionable_drift = audit.orphaned_stories.len()
+            + audit.unverified_stories.len()
+            + audit.unverified_decisions.len()
+            + audit.backlog_without_outcomes.len()
+            + audit.stale_stories.len()
+            + audit.broken_tools.len();
+        let mut items = Vec::new();
+
+        if actionable_drift > 0 {
+            items.push(ImprovementHealthItem {
+                category: "audit".to_owned(),
+                id: "entropy".to_owned(),
+                title: format!("{actionable_drift} actionable audit finding(s)"),
+                state: "drift".to_owned(),
+                schedule: "now".to_owned(),
+                outcome: String::new(),
+                evidence: String::new(),
+                next_action: "harness-cli audit".to_owned(),
+            });
+        }
+
+        for proposal in proposals {
+            let category = match proposal.lifecycle_state.as_str() {
+                "new" | "pending" | "legacy-unclassified" => "proposal_decision",
+                "regression" | "reconsideration" => "recurrence",
+                _ => continue,
+            };
+            let next_action = match proposal.lifecycle_state.as_str() {
+                "legacy-unclassified" => {
+                    "reconcile legacy identity before accepting or rejecting".to_owned()
+                }
+                _ => format!(
+                    "harness-cli propose --accept {} <schedule> OR --reject {} --reason <reason>",
+                    proposal.key, proposal.key
+                ),
+            };
+            items.push(ImprovementHealthItem {
+                category: category.to_owned(),
+                id: proposal.key,
+                title: proposal.title,
+                state: proposal.lifecycle_state,
+                schedule: "decision_pending".to_owned(),
+                outcome: String::new(),
+                evidence: proposal.evidence,
+                next_action,
+            });
+        }
+
+        let persisted_pending: Vec<(i64, String, String)> = {
+            let mut statement = connection.prepare(
+                "SELECT id, proposal_key, title FROM backlog
+                 WHERE proposal_key IS NOT NULL AND status='proposed'
+                 ORDER BY id;",
+            )?;
+            let rows =
+                statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            collect_rows(rows)?
+        };
+        for (id, key, title) in persisted_pending {
+            if items.iter().any(|item| item.id == key) {
+                continue;
+            }
+            items.push(ImprovementHealthItem {
+                category: "proposal_decision".to_owned(),
+                id: key.clone(),
+                title,
+                state: "pending".to_owned(),
+                schedule: "decision_pending".to_owned(),
+                outcome: String::new(),
+                evidence: format!("persisted backlog #{id}"),
+                next_action: format!(
+                    "harness-cli propose --accept {key} <schedule> OR --reject {key} --reason <reason>"
+                ),
+            });
+        }
+
+        #[allow(clippy::type_complexity)]
+        let lifecycle_rows: Vec<(
+            i64,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        )> = {
+            let mut statement = connection.prepare(
+                "SELECT backlog.id, backlog.title, backlog.status, backlog.uid,
+                        backlog.outcome_schedule_kind, backlog.outcome_due_at,
+                        backlog.outcome_after_traces, backlog.outcome_baseline_trace_count,
+                        observation.status, observation.ordinal,
+                        observation.outcome, observation.evidence
+                 FROM backlog
+                 LEFT JOIN backlog_outcome_observation AS observation
+                   ON observation.backlog_uid=backlog.uid
+                  AND observation.ordinal=(SELECT MAX(latest.ordinal)
+                                           FROM backlog_outcome_observation AS latest
+                                           WHERE latest.backlog_uid=backlog.uid)
+                 WHERE backlog.proposal_key IS NOT NULL
+                   AND backlog.status IN ('accepted','implemented')
+                 ORDER BY backlog.id;",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                ))
+            })?;
+            collect_rows(rows)?
+        };
+        let current_trace_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM trace WHERE uid IS NOT NULL;",
+            [],
+            |row| row.get(0),
+        )?;
+
+        for (
+            id,
+            title,
+            backlog_status,
+            _uid,
+            schedule_kind,
+            due_at,
+            after_traces,
+            baseline,
+            observation_status,
+            ordinal,
+            observation_outcome,
+            observation_evidence,
+        ) in lifecycle_rows
+        {
+            if backlog_status == "accepted" {
+                items.push(ImprovementHealthItem {
+                    category: "accepted_work".to_owned(),
+                    id: id.to_string(),
+                    title,
+                    state: "in_progress".to_owned(),
+                    schedule: schedule_kind
+                        .unwrap_or_else(|| "awaiting_observation_plan".to_owned()),
+                    outcome: String::new(),
+                    evidence: String::new(),
+                    next_action: "complete the designated resolver story with fresh proof"
+                        .to_owned(),
+                });
+                continue;
+            }
+
+            let (state, schedule, next_action) = if let Some(status) = observation_status {
+                let action = match status.as_str() {
+                    "confirmed" => {
+                        "continue monitoring; append a later observation if impact changes"
+                    }
+                    "ineffective" => {
+                        "review the ineffective change and decide the next proposal action"
+                    }
+                    "reverted" => "inspect recurrence evidence before accepting replacement work",
+                    "legacy_recorded" => {
+                        "preserved legacy evidence; append a modern observation when measured"
+                    }
+                    _ => "inspect outcome history",
+                };
+                (
+                    status,
+                    format!("observed_ordinal_{}", ordinal.unwrap_or_default()),
+                    action.to_owned(),
+                )
+            } else {
+                let outcome_command = format!(
+                    "harness-cli backlog outcome record --id {id} --status <confirmed|ineffective|reverted> --outcome <text>"
+                );
+                match schedule_kind.as_deref() {
+                    Some("manual") => (
+                        "pending_manual".to_owned(),
+                        "manual".to_owned(),
+                        outcome_command,
+                    ),
+                    Some("due_at") => {
+                        let due = due_at.unwrap_or_default();
+                        let reached: i64 = connection.query_row(
+                            "SELECT CASE WHEN datetime(?1) <= datetime('now') THEN 1 ELSE 0 END;",
+                            params![due],
+                            |row| row.get(0),
+                        )?;
+                        if reached == 1 {
+                            ("due".to_owned(), format!("due_at:{due}"), outcome_command)
+                        } else {
+                            (
+                                "scheduled_not_due".to_owned(),
+                                format!("due_at:{due}"),
+                                "wait until due, or record early if evidence is available"
+                                    .to_owned(),
+                            )
+                        }
+                    }
+                    Some("trace_count") => {
+                        let baseline = baseline.unwrap_or(0);
+                        let target = after_traces.unwrap_or(0);
+                        if current_trace_count < baseline {
+                            ("schedule_error".to_owned(), format!("trace_count:baseline={baseline},current={current_trace_count}"), "rebuild or repair the persisted trace baseline before judging due state".to_owned())
+                        } else {
+                            let observed = current_trace_count - baseline;
+                            if observed >= target {
+                                (
+                                    "due".to_owned(),
+                                    format!("trace_count:{observed}/{target}"),
+                                    outcome_command,
+                                )
+                            } else {
+                                ("scheduled_not_due".to_owned(), format!("trace_count:{observed}/{target};remaining={}", target - observed), "wait for the remaining stable traces, or record early if evidence is available".to_owned())
+                            }
+                        }
+                    }
+                    _ => (
+                        "awaiting_observation_plan".to_owned(),
+                        "legacy_null_schedule".to_owned(),
+                        "reconcile the missing observation plan; do not guess an overdue date"
+                            .to_owned(),
+                    ),
+                }
+            };
+            items.push(ImprovementHealthItem {
+                category: "outcome_review".to_owned(),
+                id: id.to_string(),
+                title,
+                state,
+                schedule,
+                outcome: observation_outcome.unwrap_or_default(),
+                evidence: observation_evidence.unwrap_or_default(),
+                next_action,
+            });
+        }
+
+        items.sort_by(|left, right| {
+            health_category_rank(&left.category)
+                .cmp(&health_category_rank(&right.category))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(ImprovementHealthResult {
+            entropy_score: audit.entropy_score(),
+            actionable_drift,
+            items,
+        })
+    }
+
     fn audit(&self) -> Result<AuditResult> {
         let connection = self.open_existing()?;
         let mut result = AuditResult {
@@ -1592,8 +2863,14 @@ impl HarnessRepository for SqliteHarnessRepository {
                 &connection,
                 "SELECT CAST(id AS TEXT), title FROM backlog
                  WHERE predicted_impact IS NOT NULL
-                   AND actual_outcome IS NULL
                    AND status='implemented'
+                   AND (
+                     (proposal_key IS NOT NULL AND NOT EXISTS (
+                       SELECT 1 FROM backlog_outcome_observation
+                       WHERE backlog_uid=backlog.uid
+                     ))
+                     OR (proposal_key IS NULL AND actual_outcome IS NULL)
+                   )
                  ORDER BY id;",
             )?,
             stale_stories: audit_findings(
@@ -1637,17 +2914,91 @@ impl HarnessRepository for SqliteHarnessRepository {
         Ok(result)
     }
 
-    fn propose(&self, commit: bool) -> Result<Vec<ImprovementProposal>> {
-        let connection = self.open_existing()?;
+    fn audit_record_evidence(&self) -> Result<AuditResult> {
+        let result = self.audit()?;
+        let mut current = Vec::new();
+        for (rule, findings) in [
+            ("orphaned-story", &result.orphaned_stories),
+            ("unverified-story", &result.unverified_stories),
+            ("unverified-decision", &result.unverified_decisions),
+            (
+                "implemented-backlog-without-outcome",
+                &result.backlog_without_outcomes,
+            ),
+            ("stale-story", &result.stale_stories),
+            ("broken-tool", &result.broken_tools),
+        ] {
+            for finding in findings {
+                let key = format!("audit.{rule}:v1:entity:{}", finding.id);
+                let fingerprint = sha256_hex(&format!("{key}\0{}", finding.title));
+                current.push((key, fingerprint));
+            }
+        }
+        let mut connection = self.open_existing()?;
+        self.with_logged_write(&mut connection, |transaction| {
+            let mut operations = Vec::new();
+            let active: Vec<(String, String, String)> = {
+                let mut statement = transaction.prepare(
+                    "SELECT uid, finding_key, evidence_fingerprint FROM audit_evidence_episode WHERE cleared_at IS NULL",
+                )?;
+                let rows = statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+                collect_rows(rows)?
+            };
+            for (uid, finding_key, _) in &active {
+                if !current.iter().any(|(key, _)| key == finding_key) {
+                    transaction.execute(
+                        "UPDATE audit_evidence_episode SET cleared_at=datetime('now') WHERE uid=?1",
+                        params![uid],
+                    )?;
+                    operations.push(json!({"op":"audit.evidence.clear","version":1,"uid":uid,"payload":{"cleared_at": transaction.query_row("SELECT cleared_at FROM audit_evidence_episode WHERE uid=?1", params![uid], |row| row.get::<_, String>(0))?}}));
+                }
+            }
+            for (finding_key, fingerprint) in &current {
+                let existing = active.iter().find(|(_, key, _)| key == finding_key);
+                if existing.is_some_and(|(_, _, old)| old == fingerprint) {
+                    continue;
+                }
+                if let Some((old_uid, _, _)) = existing {
+                    transaction.execute("UPDATE audit_evidence_episode SET cleared_at=datetime('now') WHERE uid=?1", params![old_uid])?;
+                    let cleared_at: String = transaction.query_row(
+                        "SELECT cleared_at FROM audit_evidence_episode WHERE uid=?1",
+                        params![old_uid],
+                        |row| row.get(0),
+                    )?;
+                    operations.push(json!({
+                        "op":"audit.evidence.clear",
+                        "version":1,
+                        "uid":old_uid,
+                        "payload":{"cleared_at":cleared_at}
+                    }));
+                }
+                let uid = Self::new_uid("aud", finding_key);
+                transaction.execute(
+                    "INSERT INTO audit_evidence_episode (uid, finding_key, evidence_fingerprint, opened_at) VALUES (?1, ?2, ?3, datetime('now'))",
+                    params![uid, finding_key, fingerprint],
+                )?;
+                let opened_at: String = transaction.query_row("SELECT opened_at FROM audit_evidence_episode WHERE uid=?1", params![uid], |row| row.get(0))?;
+                operations.push(json!({"op":"audit.evidence.open","version":1,"uid":uid,"payload":{"finding_key":finding_key,"evidence_fingerprint":fingerprint,"opened_at":opened_at}}));
+            }
+            Ok((result, operations))
+        })
+    }
+
+    fn propose(&self, decision: ProposalDecision) -> Result<ProposalResult> {
+        let mut connection = self.open_existing()?;
         let audit = self.audit()?;
         let mut proposals = Vec::new();
 
-        for (text, count) in repeated_friction(&connection)? {
-            if validation_provider_friction_resolved(&connection, &text)? {
-                continue;
-            }
+        for group in repeated_friction(&connection)? {
+            let text = group.text;
+            let count = group.count;
+            let title = format!("Reduce repeated friction: {}", short_title(&text));
+            let issue = format!("Failure attribution\0{title}");
             proposals.push(ImprovementProposal {
-                title: format!("Reduce repeated friction: {}", short_title(&text)),
+                key: proposal_key("improvement.proposal", 1, &issue),
+                lifecycle_state: "pending".to_owned(),
+                title,
                 component: "Failure attribution".to_owned(),
                 evidence: format!("{count} traces recorded similar friction: {text}"),
                 predicted_impact: "Fewer repeated harness friction entries for similar tasks.".to_owned(),
@@ -1656,12 +3007,21 @@ impl HarnessRepository for SqliteHarnessRepository {
                 validation_plan: "Review the next five related traces and compare friction frequency.".to_owned(),
                 confidence: confidence_for_count(count),
                 committed_backlog_id: None,
+                evidence_items: group.evidence,
+                predecessor_uid: None,
+                lifecycle_explanation: None,
             });
         }
 
-        for (key, count) in repeated_interventions(&connection)? {
+        for group in repeated_interventions(&connection)? {
+            let key = group.text;
+            let count = group.count;
+            let title = format!("Address repeated intervention: {}", short_title(&key));
+            let issue = format!("Intervention recording\0{title}");
             proposals.push(ImprovementProposal {
-                title: format!("Address repeated intervention: {}", short_title(&key)),
+                key: proposal_key("improvement.proposal", 1, &issue),
+                lifecycle_state: "pending".to_owned(),
+                title,
                 component: "Intervention recording".to_owned(),
                 evidence: format!("{count} interventions share the pattern: {key}"),
                 predicted_impact: "Fewer repeated human or review interventions for the same issue.".to_owned(),
@@ -1670,29 +3030,52 @@ impl HarnessRepository for SqliteHarnessRepository {
                 validation_plan: "Future interventions of this type should decrease after the rule change.".to_owned(),
                 confidence: confidence_for_count(count),
                 committed_backlog_id: None,
+                evidence_items: group.evidence,
+                predecessor_uid: None,
+                lifecycle_explanation: None,
             });
         }
 
-        for (category, count) in [
+        for (rule, category, findings) in [
             (
+                "orphaned-story",
                 "orphaned planned or in-progress stories",
-                audit.orphaned_stories.len(),
+                &audit.orphaned_stories,
             ),
-            ("unverified story commands", audit.unverified_stories.len()),
             (
+                "unverified-story",
+                "unverified story commands",
+                &audit.unverified_stories,
+            ),
+            (
+                "unverified-decision",
                 "unverified decision commands",
-                audit.unverified_decisions.len(),
+                &audit.unverified_decisions,
             ),
             (
+                "implemented-backlog-without-outcome",
                 "implemented backlog items without outcomes",
-                audit.backlog_without_outcomes.len(),
+                &audit.backlog_without_outcomes,
             ),
-            ("stale unfinished stories", audit.stale_stories.len()),
-            ("broken registered tools", audit.broken_tools.len()),
+            (
+                "stale-story",
+                "stale unfinished stories",
+                &audit.stale_stories,
+            ),
+            (
+                "broken-tool",
+                "broken registered tools",
+                &audit.broken_tools,
+            ),
         ] {
+            let count = findings.len();
             if count > 0 {
+                let title = format!("Clean up {category}");
+                let issue = format!("Entropy auditing\0{title}");
                 proposals.push(ImprovementProposal {
-                    title: format!("Clean up {category}"),
+                    key: proposal_key("improvement.proposal", 1, &issue),
+                    lifecycle_state: "pending".to_owned(),
+                    title,
                     component: "Entropy auditing".to_owned(),
                     evidence: format!("Audit found {count} {category}."),
                     predicted_impact: "Lower entropy score and stronger completion evidence.".to_owned(),
@@ -1701,34 +3084,36 @@ impl HarnessRepository for SqliteHarnessRepository {
                     validation_plan: "Run harness-cli audit and confirm the category count decreases.".to_owned(),
                     confidence: "low".to_owned(),
                     committed_backlog_id: None,
+                    evidence_items: audit_proposal_evidence(&connection, rule, findings)?,
+                    predecessor_uid: None,
+                    lifecycle_explanation: None,
                 });
             }
         }
 
-        if commit {
-            for proposal in &mut proposals {
-                connection.execute(
-                    "INSERT INTO backlog (
-                        title, discovered_while, current_pain, suggested_improvement,
-                        risk, predicted_impact, notes
-                     ) VALUES (?1, 'harness-cli propose', ?2, ?3, ?4, ?5, ?6);",
-                    params![
-                        proposal.title,
-                        proposal.evidence,
-                        proposal.suggested_action,
-                        normalize_token(&proposal.risk),
-                        proposal.predicted_impact,
-                        format!(
-                            "component: {}; confidence: {}; validation: {}",
-                            proposal.component, proposal.confidence, proposal.validation_plan
-                        ),
-                    ],
-                )?;
-                proposal.committed_backlog_id = Some(connection.last_insert_rowid());
-            }
+        proposals.sort_by(|left, right| left.key.cmp(&right.key));
+        for proposal in &mut proposals {
+            classify_proposal(&connection, proposal)?;
         }
 
-        Ok(proposals)
+        if matches!(decision, ProposalDecision::Preview) {
+            proposals.retain(|proposal| proposal.lifecycle_state != "suppressed");
+        }
+
+        let message = match decision {
+            ProposalDecision::Preview | ProposalDecision::PreviewSuppressed => None,
+            ProposalDecision::Accept { key, schedule } => Some(self.decide_proposal(
+                &mut connection,
+                &proposals,
+                &key,
+                Some(schedule),
+                None,
+            )?),
+            ProposalDecision::Reject { key, reason } => {
+                Some(self.decide_proposal(&mut connection, &proposals, &key, None, Some(reason))?)
+            }
+        };
+        Ok(ProposalResult { proposals, message })
     }
 
     fn apply_changeset(&self, path: &Path) -> Result<ChangesetApplyResult> {
@@ -2245,6 +3630,379 @@ fn tool_args_json(args: &[ToolArgSpec]) -> Option<String> {
     ))
 }
 
+fn parse_observation_schedule(value: &str) -> Result<(String, Option<String>, Option<i64>)> {
+    if value == "manual" {
+        return Ok(("manual".to_owned(), None, None));
+    }
+    if let Some(due) = value.strip_prefix("due:") {
+        let parsed = DateTime::parse_from_rfc3339(due).map_err(|_| {
+            HarnessInfraError::ProposalDecision("outcome due time must be RFC3339".to_owned())
+        })?;
+        return Ok((
+            "due_at".to_owned(),
+            Some(parsed.with_timezone(&Utc).to_rfc3339()),
+            None,
+        ));
+    }
+    if let Some(count) = value.strip_prefix("traces:") {
+        let count = count.parse::<i64>().map_err(|_| {
+            HarnessInfraError::ProposalDecision(
+                "outcome trace count must be a positive integer".to_owned(),
+            )
+        })?;
+        if count <= 0 {
+            return Err(HarnessInfraError::ProposalDecision(
+                "outcome trace count must be a positive integer".to_owned(),
+            ));
+        }
+        return Ok(("trace_count".to_owned(), None, Some(count)));
+    }
+    Err(HarnessInfraError::ProposalDecision(
+        "invalid observation schedule".to_owned(),
+    ))
+}
+
+fn stored_rejection_reason<'a>(
+    structured: Option<&'a str>,
+    legacy_notes: Option<&'a str>,
+) -> Option<&'a str> {
+    structured.or_else(|| {
+        legacy_notes.and_then(|notes| {
+            notes
+                .lines()
+                .find_map(|line| line.strip_prefix("rejection_reason: "))
+        })
+    })
+}
+
+fn legacy_reconcile_candidates(
+    connection: &Connection,
+    proposals: &[ImprovementProposal],
+) -> Result<Vec<LegacyReconcileCandidate>> {
+    let mut statement = connection.prepare(
+        "SELECT id, title, status, actual_outcome,
+                json_object(
+                    'created_at', created_at,
+                    'title', title,
+                    'discovered_while', discovered_while,
+                    'current_pain', current_pain,
+                    'suggested_improvement', suggested_improvement,
+                    'risk', risk,
+                    'status', status,
+                    'predicted_impact', predicted_impact,
+                    'actual_outcome', actual_outcome,
+                    'implemented_at', implemented_at,
+                    'notes', notes,
+                    'accepted_at', accepted_at,
+                    'closed_at', closed_at,
+                    'resolution_evidence', resolution_evidence,
+                    'outcome_schedule_kind', outcome_schedule_kind,
+                    'outcome_due_at', outcome_due_at,
+                    'outcome_after_traces', outcome_after_traces,
+                    'outcome_baseline_trace_count', outcome_baseline_trace_count
+                )
+         FROM backlog
+         WHERE uid IS NULL AND proposal_key IS NULL
+         ORDER BY id;",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(LegacyBacklogRow {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            status: row.get(2)?,
+            actual_outcome: row.get(3)?,
+            legacy_payload: serde_json::from_str(&row.get::<_, String>(4)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        })
+    })?;
+    let legacy_rows = collect_rows(rows)?;
+    let mut candidates = Vec::new();
+
+    for row in &legacy_rows {
+        let matching = proposals
+            .iter()
+            .filter(|proposal| proposal.title == row.title)
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            candidates.push(legacy_candidate(
+                row,
+                "manual",
+                None,
+                "no exact generated proposal title matches this historical row",
+                "none",
+                Vec::new(),
+            ));
+            continue;
+        }
+        if matching.len() != 1 {
+            candidates.push(legacy_candidate(
+                row,
+                "ambiguous",
+                None,
+                "more than one generated proposal matches this historical row",
+                "none",
+                Vec::new(),
+            ));
+            continue;
+        }
+        let proposal = matching[0];
+        let same_title = legacy_rows
+            .iter()
+            .filter(|candidate| candidate.title == row.title)
+            .count();
+        let keyed_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM backlog WHERE proposal_key=?1;",
+            params![proposal.key],
+            |query_row| query_row.get(0),
+        )?;
+        if same_title > 1 || keyed_count > 0 {
+            candidates.push(legacy_candidate(
+                row,
+                "duplicate_candidate",
+                Some(proposal.key.clone()),
+                "the issue identity already has another plausible occurrence; human canonical selection is required",
+                "none",
+                Vec::new(),
+            ));
+            continue;
+        }
+        if proposal.evidence_items.is_empty() {
+            candidates.push(legacy_candidate(
+                row,
+                "ambiguous",
+                Some(proposal.key.clone()),
+                "the generated proposal has no exact evidence item to preserve",
+                "none",
+                Vec::new(),
+            ));
+            continue;
+        }
+
+        let mut evidence = Vec::new();
+        let mut ambiguity = None;
+        for item in &proposal.evidence_items {
+            if item.source_kind != "legacy_snapshot" {
+                evidence.push((item.clone(), None));
+                continue;
+            }
+            match resolve_legacy_evidence_capture(connection, item)? {
+                Some(capture) => evidence.push((item.clone(), Some(capture))),
+                None => {
+                    ambiguity = Some(format!(
+                        "evidence {} at {} does not resolve to exactly one UID-less trace or intervention",
+                        item.fingerprint, item.observed_at
+                    ));
+                    break;
+                }
+            }
+        }
+        if let Some(reason) = ambiguity {
+            candidates.push(legacy_candidate(
+                row,
+                "ambiguous",
+                Some(proposal.key.clone()),
+                &reason,
+                "none",
+                Vec::new(),
+            ));
+            continue;
+        }
+
+        let snapshot_count = evidence
+            .iter()
+            .filter(|(_, capture)| capture.is_some())
+            .count();
+        let observation = matches!(row.status.as_str(), "implemented" | "rejected")
+            && row
+                .actual_outcome
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+        let changes = format!(
+            "uid, proposal_key, occurrence_kind, evidence_links={}{}",
+            evidence.len(),
+            if observation {
+                ", legacy_recorded outcome"
+            } else {
+                ""
+            }
+        );
+        candidates.push(LegacyReconcileCandidate {
+            row: row.clone(),
+            record: LegacyReconcileRecord {
+                backlog_id: row.id,
+                classification: "derivable".to_owned(),
+                proposal_key: Some(proposal.key.clone()),
+                reason: format!(
+                    "one exact generated proposal and complete evidence resolve deterministically ({snapshot_count} embedded snapshot(s))"
+                ),
+                changes,
+            },
+            backlog_uid: Some(stable_uid("blg", &proposal.key)),
+            evidence,
+        });
+    }
+    Ok(candidates)
+}
+
+fn legacy_candidate(
+    row: &LegacyBacklogRow,
+    classification: &str,
+    proposal_key: Option<String>,
+    reason: &str,
+    changes: &str,
+    evidence: Vec<(ProposalEvidence, Option<LegacyEvidenceCapture>)>,
+) -> LegacyReconcileCandidate {
+    LegacyReconcileCandidate {
+        row: row.clone(),
+        record: LegacyReconcileRecord {
+            backlog_id: row.id,
+            classification: classification.to_owned(),
+            proposal_key,
+            reason: reason.to_owned(),
+            changes: changes.to_owned(),
+        },
+        backlog_uid: None,
+        evidence,
+    }
+}
+
+fn resolve_legacy_evidence_capture(
+    connection: &Connection,
+    evidence: &ProposalEvidence,
+) -> Result<Option<LegacyEvidenceCapture>> {
+    let mut matches = Vec::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT id, created_at, harness_friction FROM trace
+             WHERE uid IS NULL AND harness_friction IS NOT NULL AND created_at=?1;",
+        )?;
+        let rows = statement.query_map(params![evidence.observed_at], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for (id, created_at, text) in collect_rows(rows)? {
+            if sha256_hex(&text) == evidence.fingerprint {
+                let canonical_payload = json!({
+                    "created_at": created_at,
+                    "harness_friction": text,
+                })
+                .to_string();
+                let fingerprint = sha256_hex(&canonical_payload);
+                matches.push(LegacyEvidenceCapture {
+                    uid: stable_uid("leg", &format!("trace\0{fingerprint}")),
+                    source_kind: "trace".to_owned(),
+                    source_local_id: id,
+                    fingerprint,
+                    canonical_payload,
+                });
+            }
+        }
+    }
+    {
+        let mut statement = connection.prepare(
+            "SELECT id, created_at, type, description FROM intervention
+             WHERE uid IS NULL AND created_at=?1;",
+        )?;
+        let rows = statement.query_map(params![evidence.observed_at], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for (id, created_at, intervention_type, description) in collect_rows(rows)? {
+            let text = format!("{intervention_type}: {description}");
+            if sha256_hex(&text) == evidence.fingerprint {
+                let canonical_payload = json!({
+                    "created_at": created_at,
+                    "description": description,
+                    "type": intervention_type,
+                })
+                .to_string();
+                let fingerprint = sha256_hex(&canonical_payload);
+                matches.push(LegacyEvidenceCapture {
+                    uid: stable_uid("leg", &format!("intervention\0{fingerprint}")),
+                    source_kind: "intervention".to_owned(),
+                    source_local_id: id,
+                    fingerprint,
+                    canonical_payload,
+                });
+            }
+        }
+    }
+    Ok((matches.len() == 1).then(|| matches.remove(0)))
+}
+
+fn record_proposal_evidence(
+    transaction: &Transaction<'_>,
+    backlog_uid: &str,
+    proposal: &ImprovementProposal,
+) -> Result<()> {
+    for evidence in &proposal.evidence_items {
+        transaction.execute(
+            "INSERT OR IGNORE INTO proposal_evidence_link (backlog_uid, source_kind, evidence_uid, evidence_fingerprint, observed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5);",
+            params![
+                backlog_uid,
+                evidence.source_kind,
+                evidence.uid,
+                evidence.fingerprint,
+                evidence.observed_at
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn proposal_decision_operation(
+    uid: &str,
+    key: &str,
+    status: &str,
+    proposal: &ImprovementProposal,
+    schedule: Option<(&String, Option<&str>, Option<i64>)>,
+    reason: Option<&String>,
+    accepted_at: Option<&str>,
+    closed_at: Option<&str>,
+    notes: Option<&str>,
+) -> Value {
+    let occurrence_kind = match proposal.lifecycle_state.as_str() {
+        "regression" => "regression",
+        "reconsideration" => "reconsideration",
+        _ => "original",
+    };
+    json!({
+        "op": "backlog.proposal.decision", "version": 2, "uid": uid,
+        "payload": {
+            "proposal_key": key, "status": status, "occurrence_kind": occurrence_kind,
+            "predecessor_uid": proposal.predecessor_uid,
+            "title": proposal.title, "discovered_while": "harness-cli propose",
+            "current_pain": proposal.evidence, "suggested_improvement": proposal.suggested_action,
+            "risk": normalize_token(&proposal.risk), "predicted_impact": proposal.predicted_impact,
+            "notes": notes, "accepted_at": accepted_at, "closed_at": closed_at,
+            "outcome_schedule_kind": schedule.as_ref().map(|item| item.0),
+            "outcome_due_at": schedule.as_ref().and_then(|item| item.1),
+            "outcome_after_traces": schedule.and_then(|item| item.2),
+            "rejection_reason": reason,
+            "evidence": proposal.evidence_items.iter().map(|item| json!({
+                "source_kind": item.source_kind,
+                "evidence_uid": item.uid,
+                "evidence_fingerprint": item.fingerprint,
+                "observed_at": item.observed_at,
+            })).collect::<Vec<_>>(),
+        }
+    })
+}
+
 fn parse_stored_tool_args(value: Option<&str>) -> Vec<ToolArgSpec> {
     let Some(value) = value else {
         return Vec::new();
@@ -2305,72 +4063,235 @@ fn audit_findings(connection: &Connection, sql: &str) -> Result<Vec<AuditFinding
     collect_rows(rows)
 }
 
-fn repeated_friction(connection: &Connection) -> Result<Vec<(String, usize)>> {
+fn health_category_rank(category: &str) -> u8 {
+    match category {
+        "audit" => 0,
+        "proposal_decision" => 1,
+        "accepted_work" => 2,
+        "outcome_review" => 3,
+        "recurrence" => 4,
+        _ => 5,
+    }
+}
+
+#[derive(Debug)]
+struct ProposalEvidenceGroup {
+    text: String,
+    count: usize,
+    evidence: Vec<ProposalEvidence>,
+}
+
+fn repeated_friction(connection: &Connection) -> Result<Vec<ProposalEvidenceGroup>> {
     let mut statement = connection.prepare(
-        "SELECT harness_friction FROM trace
+        "SELECT uid, harness_friction, created_at FROM trace
          WHERE harness_friction IS NOT NULL
            AND TRIM(harness_friction) <> ''
            AND LOWER(TRIM(harness_friction)) <> 'none';",
     )?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
     let values = collect_rows(rows)?;
-    Ok(repeated_values(values))
+    Ok(repeated_values("trace", values))
 }
 
-fn validation_provider_friction_resolved(connection: &Connection, text: &str) -> Result<bool> {
-    let normalized = normalize_token(text);
-    if !normalized.contains("tool_registry_lacks_entries_for_local_validation_capabilities") {
-        return Ok(false);
-    }
-
-    for capability in [
-        "build-verification",
-        "browser-e2e",
-        "coverage",
-        "design-validation",
-        "platform-smoke",
-    ] {
-        if !has_present_provider(connection, capability)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-fn has_present_provider(connection: &Connection, capability: &str) -> Result<bool> {
-    let count: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM tool WHERE capability=?1 AND status='present';",
-        params![capability],
-        |row| row.get(0),
-    )?;
-    Ok(count > 0)
-}
-
-fn repeated_interventions(connection: &Connection) -> Result<Vec<(String, usize)>> {
+fn repeated_interventions(connection: &Connection) -> Result<Vec<ProposalEvidenceGroup>> {
     let mut statement = connection.prepare(
-        "SELECT type || ': ' || description FROM intervention
+        "SELECT uid, type || ': ' || description, created_at FROM intervention
          WHERE TRIM(description) <> '';",
     )?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
     let values = collect_rows(rows)?;
-    Ok(repeated_values(values))
+    Ok(repeated_values("intervention", values))
 }
 
-fn repeated_values(values: Vec<String>) -> Vec<(String, usize)> {
-    let mut grouped: Vec<(String, String, usize)> = Vec::new();
-    for value in values {
+fn repeated_values(
+    source_kind: &str,
+    values: Vec<(Option<String>, String, String)>,
+) -> Vec<ProposalEvidenceGroup> {
+    let mut grouped: Vec<(String, String, Vec<ProposalEvidence>)> = Vec::new();
+    for (uid, value, observed_at) in values {
         let key = normalize_token(&value);
+        let evidence = ProposalEvidence {
+            source_kind: uid
+                .as_ref()
+                .map(|_| source_kind.to_owned())
+                .unwrap_or_else(|| "legacy_snapshot".to_owned()),
+            uid: uid.unwrap_or_else(|| format!("legacy-{}", sha256_hex(&value))),
+            fingerprint: sha256_hex(&value),
+            observed_at,
+        };
         if let Some(existing) = grouped.iter_mut().find(|item| item.0 == key) {
-            existing.2 += 1;
+            existing.2.push(evidence);
         } else {
-            grouped.push((key, value, 1));
+            grouped.push((key, value, vec![evidence]));
         }
     }
     grouped
         .into_iter()
-        .filter(|(_, _, count)| *count >= 2)
-        .map(|(_, value, count)| (value, count))
+        .filter(|(_, _, evidence)| evidence.len() >= 2)
+        .map(|(_, text, evidence)| ProposalEvidenceGroup {
+            count: evidence.len(),
+            text,
+            evidence,
+        })
         .collect()
+}
+
+fn audit_proposal_evidence(
+    connection: &Connection,
+    rule: &str,
+    findings: &[AuditFinding],
+) -> Result<Vec<ProposalEvidence>> {
+    findings
+        .iter()
+        .map(|finding| {
+            let finding_key = format!("audit.{rule}:v1:entity:{}", finding.id);
+            let active: Option<(String, String, String)> = connection
+                .query_row(
+                    "SELECT uid, evidence_fingerprint, opened_at FROM audit_evidence_episode
+                     WHERE finding_key=?1 AND cleared_at IS NULL;",
+                    params![finding_key],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            Ok(match active {
+                Some((uid, fingerprint, observed_at)) => ProposalEvidence {
+                    source_kind: "audit".to_owned(),
+                    uid,
+                    fingerprint,
+                    observed_at,
+                },
+                None => ProposalEvidence {
+                    source_kind: "legacy_snapshot".to_owned(),
+                    uid: finding_key.clone(),
+                    fingerprint: sha256_hex(&format!("{finding_key}\0{}", finding.title)),
+                    observed_at: "1970-01-01 00:00:00".to_owned(),
+                },
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::type_complexity)]
+fn classify_proposal(connection: &Connection, proposal: &mut ImprovementProposal) -> Result<()> {
+    let latest: Option<(
+        i64,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = connection
+        .query_row(
+            "SELECT backlog.id, backlog.uid, backlog.status, backlog.occurrence_kind,
+                    backlog.resolution_evidence, backlog.closed_at,
+                    (SELECT story_id FROM story_backlog_link
+                     WHERE backlog_uid=backlog.uid AND relationship='resolves')
+             FROM backlog WHERE proposal_key=?1 ORDER BY id DESC LIMIT 1;",
+            params![proposal.key],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let Some((id, uid, status, kind, closure_proof, closed_at, resolver)) = latest else {
+        let legacy: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM backlog WHERE proposal_key IS NULL AND title=?1;",
+            params![proposal.title],
+            |row| row.get(0),
+        )?;
+        if legacy > 0 {
+            proposal.lifecycle_state = "legacy-unclassified".to_owned();
+            proposal.lifecycle_explanation = Some(
+                "plausible unkeyed legacy match; use US-080 reconciliation instead of guessing identity"
+                    .to_owned(),
+            );
+        } else {
+            proposal.lifecycle_state = "new".to_owned();
+        }
+        return Ok(());
+    };
+
+    proposal.committed_backlog_id = Some(id);
+    match status.as_str() {
+        "proposed" => {
+            proposal.lifecycle_state = "pending".to_owned();
+            proposal.lifecycle_explanation = Some(format!("existing proposed backlog #{id}"));
+        }
+        "accepted" => {
+            proposal.lifecycle_state = "accepted".to_owned();
+            proposal.lifecycle_explanation = Some(format!("active accepted backlog #{id}"));
+        }
+        "implemented" | "rejected" => {
+            let mut statement = connection.prepare(
+                "SELECT link.source_kind, link.evidence_uid
+                 FROM proposal_evidence_link link
+                 JOIN backlog ON backlog.uid=link.backlog_uid
+                 WHERE backlog.proposal_key=?1;",
+            )?;
+            let rows = statement.query_map(params![proposal.key], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let covered = collect_rows(rows)?;
+            proposal.evidence_items.retain(|item| {
+                let explicitly_covered = covered
+                    .iter()
+                    .any(|covered| covered.0 == item.source_kind && covered.1 == item.uid);
+                // Durable timestamps currently have one-second precision, so
+                // equality is the conservative representation of "at/after".
+                let observed_after_closure = closed_at
+                    .as_ref()
+                    .is_some_and(|closed| item.observed_at >= *closed);
+                !explicitly_covered && observed_after_closure
+            });
+            proposal.predecessor_uid = Some(uid.clone());
+            if proposal.evidence_items.is_empty() {
+                proposal.lifecycle_state = "suppressed".to_owned();
+                proposal.lifecycle_explanation = Some(format!(
+                    "backlog #{id} ({}) closed by resolver {} with proof {}; no uncovered evidence",
+                    kind.as_deref().unwrap_or("original"),
+                    resolver.as_deref().unwrap_or("none"),
+                    closure_proof.as_deref().unwrap_or("not recorded")
+                ));
+            } else {
+                proposal.lifecycle_state = if status == "implemented" {
+                    "regression"
+                } else {
+                    "reconsideration"
+                }
+                .to_owned();
+                proposal.lifecycle_explanation = Some(format!(
+                    "{} uncovered evidence item(s) after terminal backlog #{id}",
+                    proposal.evidence_items.len()
+                ));
+            }
+        }
+        _ => {
+            proposal.lifecycle_state = status;
+        }
+    }
+    Ok(())
 }
 
 fn confidence_for_count(count: usize) -> String {
@@ -2387,8 +4308,8 @@ fn short_title(value: &str) -> String {
         .take(8)
         .collect::<Vec<_>>()
         .join(" ");
-    if words.len() > 72 {
-        format!("{}...", &words[..69])
+    if words.chars().count() > 72 {
+        format!("{}...", words.chars().take(69).collect::<String>())
     } else {
         words
     }
@@ -2444,8 +4365,27 @@ fn apply_changeset_operation(
     context: &mut ChangesetApplyContext,
 ) -> Result<()> {
     let op = required_string(operation, "op")?;
+    let version = operation
+        .get("version")
+        .and_then(Value::as_i64)
+        .unwrap_or(1);
     let payload = operation.get("payload").unwrap_or(&Value::Null);
+    if !(1..=2).contains(&version) {
+        return Err(HarnessInfraError::InvalidChangeset(format!(
+            "unsupported version {version} for operation {op}"
+        )));
+    }
     match op.as_str() {
+        "intake.add" if version == 2 => {
+            let uid = required_uid(operation, "uid", "ink")?;
+            transaction.execute(
+                "INSERT INTO intake (uid, created_at, input_type, summary, risk_lane, risk_flags, affected_docs, story_id, notes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(uid) DO NOTHING;",
+                params![uid, required_timestamp(payload, "created_at")?, required_string(payload, "input_type")?, required_string(payload, "summary")?, required_string(payload, "risk_lane")?, optional_string(payload, "risk_flags"), optional_string(payload, "affected_docs"), optional_string(payload, "story_id"), optional_string(payload, "notes")],
+            )?;
+            1
+        }
         "intake.add" => {
             let source_id = required_i64(operation, "id")?;
             transaction.execute(
@@ -2500,15 +4440,265 @@ fn apply_changeset_operation(
                 required_string(operation, "id")?,
             ],
         )?,
-        "story.verify" => transaction.execute(
-            "UPDATE story
-             SET last_verified_at=datetime('now'), last_verified_result=?1
-             WHERE id=?2;",
+        "story.dependency.add" => {
+            let blocker = required_string(operation, "id")?;
+            let blocked = required_string(payload, "blocked")?;
+            if blocker == blocked {
+                return Err(HarnessInfraError::StoryDependencySelf(blocker));
+            }
+            ensure_story_exists(transaction, &blocker)?;
+            ensure_story_exists(transaction, &blocked)?;
+            if dependency_path_exists(transaction, &blocked, &blocker)? {
+                return Err(HarnessInfraError::StoryDependencyCycle(blocker, blocked));
+            }
+            transaction.execute(
+                "INSERT INTO story_dependency (story_id, blocks_story_id) VALUES (?1, ?2)
+                 ON CONFLICT(story_id, blocks_story_id) DO NOTHING;",
+                params![blocker, blocked],
+            )?
+        }
+        "story.dependency.remove" => transaction.execute(
+            "DELETE FROM story_dependency WHERE story_id=?1 AND blocks_story_id=?2;",
             params![
-                required_string(payload, "result")?,
                 required_string(operation, "id")?,
+                required_string(payload, "blocked")?,
             ],
         )?,
+        "story.backlog.link" => {
+            let story_id = required_string(operation, "id")?;
+            let backlog_uid = required_uid(payload, "backlog_uid", "blg")?;
+            let relationship = required_string(payload, "relationship")?;
+            let (backlog_id, backlog_status): (i64, String) = transaction.query_row("SELECT id, status FROM backlog WHERE uid=?1;", params![backlog_uid], |row| Ok((row.get(0)?, row.get(1)?))).optional()?.ok_or_else(|| HarnessInfraError::InvalidChangeset(format!("story backlog link references missing backlog uid '{backlog_uid}'")))?;
+            let story_status: String = transaction.query_row("SELECT status FROM story WHERE id=?1;", params![story_id], |row| row.get(0)).optional()?.ok_or_else(|| HarnessInfraError::StoryNotFound(story_id.clone()))?;
+            let previous: Option<String> = transaction.query_row("SELECT relationship FROM story_backlog_link WHERE story_id=?1 AND backlog_uid=?2;", params![story_id, backlog_uid], |row| row.get(0)).optional()?;
+            if previous.as_deref() != Some(&relationship) {
+                if relationship == "resolves" || previous.as_deref() == Some("resolves") { validate_resolver_mutation(transaction, &story_id, backlog_id, &backlog_status, &story_status, &backlog_uid)?; }
+                if !matches!(relationship.as_str(), "resolves" | "references") { return Err(HarnessInfraError::StoryBacklogRelationship); }
+                let linked_at = if version >= 2 {
+                    Some(required_timestamp(payload, "linked_at")?)
+                } else {
+                    optional_string(payload, "linked_at")
+                };
+                transaction.execute("INSERT INTO story_backlog_link (story_id, backlog_uid, relationship, linked_at, linked_at_unix_ns) VALUES (?1, ?2, ?3, COALESCE(?4, datetime('now')), ?5) ON CONFLICT(story_id, backlog_uid) DO UPDATE SET relationship=excluded.relationship, linked_at=excluded.linked_at, linked_at_unix_ns=excluded.linked_at_unix_ns;", params![story_id, backlog_uid, relationship, linked_at, optional_i64(payload, "linked_at_unix_ns")])?;
+                if relationship == "resolves" || previous.as_deref() == Some("resolves") { transaction.execute("UPDATE story SET last_verified_at=NULL, last_verified_result=NULL WHERE id=?1;", params![story_id])?; }
+            }
+            1
+        }
+        "story.backlog.unlink" => {
+            let story_id = required_string(operation, "id")?;
+            let backlog_uid = required_uid(payload, "backlog_uid", "blg")?;
+            let linked: Option<(i64, String, String)> = transaction.query_row("SELECT backlog.id, backlog.status, link.relationship FROM story_backlog_link AS link JOIN backlog ON backlog.uid=link.backlog_uid WHERE link.story_id=?1 AND link.backlog_uid=?2;", params![story_id, backlog_uid], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+            if let Some((backlog_id, backlog_status, relationship)) = linked {
+                if relationship == "resolves" { let story_status: String = transaction.query_row("SELECT status FROM story WHERE id=?1;", params![story_id], |row| row.get(0))?; validate_resolver_mutation(transaction, &story_id, backlog_id, &backlog_status, &story_status, &backlog_uid)?; transaction.execute("UPDATE story SET last_verified_at=NULL, last_verified_result=NULL WHERE id=?1;", params![story_id])?; }
+                transaction.execute("DELETE FROM story_backlog_link WHERE story_id=?1 AND backlog_uid=?2;", params![story_id, backlog_uid])?;
+            }
+            1
+        }
+        "story.verify" => {
+            let verified_at = match (version, optional_string(payload, "verified_at")) {
+                (2.., Some(value)) => canonical_sqlite_timestamp(value, "verified_at")?,
+                (2.., None) => {
+                    return Err(HarnessInfraError::InvalidChangeset(
+                        "story.verify version 2 requires verified_at".to_owned(),
+                    ));
+                }
+                (_, Some(value)) => value,
+                (_, None) => transaction.query_row("SELECT datetime('now')", [], |row| row.get(0))?,
+            };
+            transaction.execute(
+                "UPDATE story SET last_verified_at=?1, last_verified_result=?2 WHERE id=?3;",
+                params![
+                    verified_at,
+                    required_string(payload, "result")?,
+                    required_string(operation, "id")?,
+                ],
+            )?
+        }
+        "story.complete" => {
+            let completed_at = match (version, optional_string(payload, "completed_at")) {
+                (2.., Some(value)) => canonical_sqlite_timestamp(value, "completed_at")?,
+                (2.., None) => return Err(HarnessInfraError::InvalidChangeset(
+                    "story.complete version 2 requires completed_at".to_owned(),
+                )),
+                (_, Some(value)) => value,
+                (_, None) => transaction.query_row("SELECT datetime('now')", [], |row| row.get(0))?,
+            };
+            transaction.execute(
+                "UPDATE story SET status='implemented', last_verified_at=?1, last_verified_result=?2 WHERE id=?3;",
+                params![completed_at, required_string(payload, "result")?, required_string(operation, "id")?],
+            )?
+        }
+        "backlog.complete" => {
+            let uid = required_uid(operation, "uid", "blg")?;
+            let story_id = required_string(payload, "story_id")?;
+            let baseline = optional_i64(payload, "trace_baseline");
+            let evidence = optional_string(payload, "resolution_evidence")
+                .unwrap_or_else(|| json!({"story_id": story_id, "result":"pass"}).to_string());
+            let completed_at = match (version, optional_string(payload, "completed_at")) {
+                (2.., Some(value)) => canonical_sqlite_timestamp(value, "completed_at")?,
+                (2.., None) => return Err(HarnessInfraError::InvalidChangeset(
+                    "backlog.complete version 2 requires completed_at".to_owned(),
+                )),
+                (_, Some(value)) => value,
+                (_, None) => transaction.query_row("SELECT datetime('now')", [], |row| row.get(0))?,
+            };
+            transaction.execute(
+                "UPDATE backlog SET status='implemented', implemented_at=?1, closed_at=?1, resolution_evidence=COALESCE(resolution_evidence, ?2), outcome_baseline_trace_count=COALESCE(?3, outcome_baseline_trace_count) WHERE uid=?4;",
+                params![completed_at, evidence, baseline, uid],
+            )?
+        }
+        "legacy.evidence.capture" => {
+            let uid = required_uid(operation, "uid", "leg")?;
+            let source_kind = required_string(payload, "source_kind")?;
+            if !matches!(source_kind.as_str(), "trace" | "intervention") {
+                return Err(HarnessInfraError::InvalidChangeset(
+                    "legacy evidence source_kind must be trace or intervention".to_owned(),
+                ));
+            }
+            transaction.execute(
+                "INSERT INTO legacy_evidence_snapshot
+                    (uid, source_kind, source_local_id, evidence_fingerprint,
+                     canonical_payload, captured_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(source_kind, evidence_fingerprint) DO NOTHING;",
+                params![
+                    uid,
+                    source_kind,
+                    optional_i64(payload, "source_local_id"),
+                    required_string(payload, "evidence_fingerprint")?,
+                    required_string(payload, "canonical_payload")?,
+                    required_timestamp(payload, "captured_at")?,
+                ],
+            )?
+        }
+        "backlog.legacy.reconcile" => {
+            let uid = required_uid(operation, "uid", "blg")?;
+            let title = required_string(payload, "title")?;
+            let existing: Option<i64> = transaction
+                .query_row("SELECT id FROM backlog WHERE uid=?1;", params![uid], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+            if existing.is_none() {
+                let ids = {
+                    let mut statement = transaction.prepare(
+                        "SELECT id FROM backlog
+                         WHERE title=?1 AND uid IS NULL AND proposal_key IS NULL
+                         ORDER BY id;",
+                    )?;
+                    let rows = statement.query_map(params![title], |row| row.get::<_, i64>(0))?;
+                    collect_rows(rows)?
+                };
+                if ids.len() > 1 {
+                    return Err(HarnessInfraError::InvalidChangeset(format!(
+                        "legacy reconciliation expected at most one unkeyed row titled '{title}', found {}",
+                        ids.len()
+                    )));
+                }
+                if let Some(id) = ids.first() {
+                    transaction.execute(
+                        "UPDATE backlog SET uid=?1, proposal_key=?2, occurrence_kind=?3
+                         WHERE id=?4 AND uid IS NULL AND proposal_key IS NULL;",
+                        params![
+                            uid,
+                            required_string(payload, "proposal_key")?,
+                            required_string(payload, "occurrence_kind")?,
+                            id
+                        ],
+                    )?;
+                } else {
+                    let legacy = payload.get("legacy_row").ok_or_else(|| {
+                        HarnessInfraError::InvalidChangeset(
+                            "legacy reconciliation cannot reconstruct a missing row without legacy_row"
+                                .to_owned(),
+                        )
+                    })?;
+                    transaction.execute(
+                        "INSERT INTO backlog
+                            (uid, proposal_key, occurrence_kind, created_at, title,
+                             discovered_while, current_pain, suggested_improvement, risk, status,
+                             predicted_impact, actual_outcome, implemented_at, notes, accepted_at,
+                             closed_at, resolution_evidence, outcome_schedule_kind, outcome_due_at,
+                             outcome_after_traces, outcome_baseline_trace_count)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                                 ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21);",
+                        params![
+                            uid,
+                            required_string(payload, "proposal_key")?,
+                            required_string(payload, "occurrence_kind")?,
+                            required_string(legacy, "created_at")?,
+                            required_string(legacy, "title")?,
+                            optional_string(legacy, "discovered_while"),
+                            optional_string(legacy, "current_pain"),
+                            optional_string(legacy, "suggested_improvement"),
+                            optional_string(legacy, "risk"),
+                            required_string(legacy, "status")?,
+                            optional_string(legacy, "predicted_impact"),
+                            optional_string(legacy, "actual_outcome"),
+                            optional_string(legacy, "implemented_at"),
+                            optional_string(legacy, "notes"),
+                            optional_string(legacy, "accepted_at"),
+                            optional_string(legacy, "closed_at"),
+                            optional_string(legacy, "resolution_evidence"),
+                            optional_string(legacy, "outcome_schedule_kind"),
+                            optional_string(legacy, "outcome_due_at"),
+                            optional_i64(legacy, "outcome_after_traces"),
+                            optional_i64(legacy, "outcome_baseline_trace_count"),
+                        ],
+                    )?;
+                }
+            }
+            if let Some(evidence) = payload.get("evidence").and_then(Value::as_array) {
+                for item in evidence {
+                    let observed_at = if version >= 2 {
+                        Some(required_timestamp(item, "observed_at")?)
+                    } else {
+                        optional_string(item, "observed_at")
+                    };
+                    transaction.execute(
+                        "INSERT OR IGNORE INTO proposal_evidence_link
+                            (backlog_uid, source_kind, evidence_uid, evidence_fingerprint, observed_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5);",
+                        params![
+                            uid,
+                            required_string(item, "source_kind")?,
+                            required_string(item, "evidence_uid")?,
+                            required_string(item, "evidence_fingerprint")?,
+                            observed_at,
+                        ],
+                    )?;
+                }
+            }
+            1
+        }
+        "backlog.outcome.observe" => {
+            let uid = required_uid(operation, "uid", "obs")?;
+            let backlog_uid = required_uid(payload, "backlog_uid", "blg")?;
+            let status = required_string(payload, "status")?;
+            if !matches!(
+                status.as_str(),
+                "confirmed" | "ineffective" | "reverted" | "legacy_recorded"
+            ) {
+                return Err(HarnessInfraError::InvalidChangeset(
+                    "invalid backlog outcome observation status".to_owned(),
+                ));
+            }
+            transaction.execute(
+                "INSERT INTO backlog_outcome_observation
+                    (uid, backlog_uid, ordinal, status, outcome, evidence, observed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(uid) DO NOTHING;",
+                params![
+                    uid,
+                    backlog_uid,
+                    required_i64(payload, "ordinal")?,
+                    status,
+                    required_string(payload, "outcome")?,
+                    optional_string(payload, "evidence"),
+                    required_timestamp(payload, "observed_at")?,
+                ],
+            )?
+        }
         "decision.add" => transaction.execute(
             "INSERT INTO decision (id, title, status, doc_path, verify_command, predicted_impact, notes)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
@@ -2531,6 +4721,59 @@ fn apply_changeset_operation(
                 required_string(operation, "id")?,
             ],
         )?,
+        "backlog.proposal.decision" => {
+            let uid = required_uid(operation, "uid", "blg")?;
+            let accepted_at = if version >= 2 {
+                optional_timestamp(payload, "accepted_at")?
+            } else {
+                optional_string(payload, "accepted_at")
+            };
+            let closed_at = if version >= 2 {
+                optional_timestamp(payload, "closed_at")?
+            } else {
+                optional_string(payload, "closed_at")
+            };
+            transaction.execute(
+                "INSERT INTO backlog (uid, proposal_key, predecessor_uid, occurrence_kind, title, discovered_while, current_pain, suggested_improvement, risk, status, predicted_impact, notes, accepted_at, closed_at, outcome_schedule_kind, outcome_due_at, outcome_after_traces, outcome_baseline_trace_count, rejection_reason)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, NULL, ?18)
+                 ON CONFLICT(uid) DO UPDATE SET
+                   status=excluded.status, notes=excluded.notes, accepted_at=excluded.accepted_at,
+                   closed_at=excluded.closed_at, outcome_schedule_kind=excluded.outcome_schedule_kind,
+                   outcome_due_at=excluded.outcome_due_at, outcome_after_traces=excluded.outcome_after_traces,
+                   rejection_reason=excluded.rejection_reason;",
+                params![uid, required_string(payload, "proposal_key")?, optional_string(payload, "predecessor_uid"), required_string(payload, "occurrence_kind")?, required_string(payload, "title")?, optional_string(payload, "discovered_while"), optional_string(payload, "current_pain"), optional_string(payload, "suggested_improvement"), optional_string(payload, "risk"), required_string(payload, "status")?, optional_string(payload, "predicted_impact"), optional_string(payload, "notes"), accepted_at, closed_at, optional_string(payload, "outcome_schedule_kind"), optional_string(payload, "outcome_due_at"), optional_i64(payload, "outcome_after_traces"), optional_string(payload, "rejection_reason")]
+            )?;
+            if let Some(evidence) = payload.get("evidence").and_then(Value::as_array) {
+                for item in evidence {
+                    let observed_at = if version >= 2 {
+                        Some(required_timestamp(item, "observed_at")?)
+                    } else {
+                        optional_string(item, "observed_at")
+                    };
+                    transaction.execute(
+                        "INSERT OR IGNORE INTO proposal_evidence_link (backlog_uid, source_kind, evidence_uid, evidence_fingerprint, observed_at)
+                         VALUES (?1, ?2, ?3, ?4, COALESCE(?5, datetime('now')));",
+                        params![uid, required_string(item, "source_kind")?, required_string(item, "evidence_uid")?, required_string(item, "evidence_fingerprint")?, observed_at],
+                    )?;
+                }
+            } else {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO proposal_evidence_link (backlog_uid, source_kind, evidence_uid, evidence_fingerprint, observed_at)
+                     VALUES (?1, 'legacy_snapshot', ?2, ?3, datetime('now'));",
+                    params![uid, required_string(payload, "evidence_uid")?, required_string(payload, "evidence_fingerprint")?]
+                )?;
+            }
+            1
+        }
+        "backlog.add" if version == 2 => {
+            let uid = required_uid(operation, "uid", "blg")?;
+            transaction.execute(
+                "INSERT INTO backlog (uid, created_at, proposal_key, occurrence_kind, title, discovered_while, current_pain, suggested_improvement, risk, predicted_impact, notes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);",
+                params![uid, required_timestamp(payload, "created_at")?, optional_string(payload, "proposal_key"), optional_string(payload, "occurrence_kind"), required_string(payload, "title")?, optional_string(payload, "discovered_while"), optional_string(payload, "current_pain"), optional_string(payload, "suggested_improvement"), optional_string(payload, "risk"), optional_string(payload, "predicted_impact"), optional_string(payload, "notes")],
+            )?;
+            1
+        }
         "backlog.add" => {
             let source_id = required_i64(operation, "id")?;
             transaction.execute(
@@ -2590,6 +4833,15 @@ fn apply_changeset_operation(
             "DELETE FROM tool WHERE name=?1;",
             params![required_string(operation, "id")?],
         )?,
+        "intervention.add" if version == 2 => {
+            let uid = required_uid(operation, "uid", "int")?;
+            let trace_id = resolve_uid(transaction, optional_string(payload, "trace_uid"), "trace")?;
+            transaction.execute(
+            "INSERT INTO intervention (uid, created_at, trace_id, story_id, type, description, source, impact)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);",
+            params![uid, required_timestamp(payload, "created_at")?, trace_id, optional_string(payload, "story_id"), required_string(payload, "type")?, required_string(payload, "description")?, required_string(payload, "source")?, optional_string(payload, "impact")],
+            )?
+        }
         "intervention.add" => transaction.execute(
             "INSERT INTO intervention (trace_id, story_id, type, description, source, impact)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
@@ -2602,6 +4854,33 @@ fn apply_changeset_operation(
                 optional_string(payload, "impact"),
             ],
         )?,
+        "trace.add" if version == 2 => {
+            let uid = required_uid(operation, "uid", "trc")?;
+            let intake_id = resolve_uid(transaction, optional_string(payload, "intake_uid"), "intake")?;
+            transaction.execute(
+            "INSERT INTO trace (uid, created_at, recorded_at_unix_ns, intake_uid, task_summary, intake_id, story_id, agent,
+                actions_taken, files_read, files_changed, decisions_made, errors,
+                outcome, duration_seconds, token_estimate, harness_friction, notes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+             ON CONFLICT(uid) DO NOTHING;",
+            params![uid, required_timestamp(payload, "created_at")?, optional_i64(payload, "recorded_at_unix_ns"), optional_string(payload, "intake_uid"), required_string(payload, "task_summary")?, intake_id, optional_string(payload, "story_id"), optional_string(payload, "agent"), optional_string(payload, "actions_taken"), optional_string(payload, "files_read"), optional_string(payload, "files_changed"), optional_string(payload, "decisions_made"), optional_string(payload, "errors"), optional_string(payload, "outcome"), optional_i64(payload, "duration_seconds"), optional_i64(payload, "token_estimate"), optional_string(payload, "harness_friction"), optional_string(payload, "notes")],
+            )?;
+            1
+        }
+        "audit.evidence.open" => {
+            transaction.execute(
+                "INSERT INTO audit_evidence_episode (uid, finding_key, evidence_fingerprint, opened_at) VALUES (?1, ?2, ?3, ?4)",
+                params![required_string(operation, "uid")?, required_string(payload, "finding_key")?, required_string(payload, "evidence_fingerprint")?, required_timestamp(payload, "opened_at")?],
+            )?;
+            1
+        }
+        "audit.evidence.clear" => {
+            transaction.execute(
+                "UPDATE audit_evidence_episode SET cleared_at=?1 WHERE uid=?2",
+                params![required_timestamp(payload, "cleared_at")?, required_string(operation, "uid")?],
+            )?;
+            1
+        }
         "trace.add" => {
             let source_id = required_i64(operation, "id")?;
             transaction.execute(
@@ -2637,6 +4916,250 @@ fn apply_changeset_operation(
     Ok(())
 }
 
+fn ensure_story_exists(transaction: &Transaction<'_>, id: &str) -> Result<()> {
+    let exists = transaction
+        .query_row("SELECT 1 FROM story WHERE id=?1;", params![id], |_| Ok(()))
+        .optional()?
+        .is_some();
+    if exists {
+        Ok(())
+    } else {
+        Err(HarnessInfraError::StoryNotFound(id.to_owned()))
+    }
+}
+
+fn story_completion_context(
+    connection: &Connection,
+    story_id: &str,
+) -> Result<StoryCompletionContext> {
+    let resolver_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM story_backlog_link WHERE story_id=?1 AND relationship='resolves';",
+        params![story_id],
+        |row| row.get(0),
+    )?;
+    if resolver_count == 0 {
+        return Ok(StoryCompletionContext::default());
+    }
+
+    let intake_exists = connection
+        .query_row(
+            "SELECT 1 FROM intake WHERE story_id=?1 AND input_type='harness_improvement' AND uid IS NOT NULL LIMIT 1;",
+            params![story_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !intake_exists {
+        return Err(HarnessInfraError::StoryCompletion(
+            "resolver stories require a linked harness_improvement intake with stable identity"
+                .to_owned(),
+        ));
+    }
+
+    let proof: Option<(String, String)> = connection
+        .query_row(
+            "SELECT intake.uid, trace.uid
+             FROM intake
+             JOIN trace ON trace.intake_uid=intake.uid
+             WHERE intake.story_id=?1
+               AND intake.input_type='harness_improvement'
+               AND intake.uid IS NOT NULL
+               AND trace.story_id=?1
+               AND trace.uid IS NOT NULL
+               AND trace.outcome='completed'
+               AND COALESCE(trace.actions_taken,'') NOT IN ('','[]')
+               AND COALESCE(trace.files_changed,'') NOT IN ('','[]')
+               AND (
+                   (
+                       (SELECT linked_at_unix_ns
+                        FROM story_backlog_link
+                        WHERE story_id=?1 AND relationship='resolves'
+                        ORDER BY linked_at DESC,
+                                 linked_at_unix_ns IS NOT NULL DESC,
+                                 backlog_uid DESC
+                        LIMIT 1) IS NOT NULL
+                       AND trace.recorded_at_unix_ns > (
+                           SELECT linked_at_unix_ns FROM story_backlog_link
+                           WHERE story_id=?1 AND relationship='resolves'
+                           ORDER BY linked_at DESC,
+                                    linked_at_unix_ns IS NOT NULL DESC,
+                                    backlog_uid DESC
+                           LIMIT 1
+                       )
+                   )
+                   OR (
+                       (SELECT linked_at_unix_ns
+                        FROM story_backlog_link
+                        WHERE story_id=?1 AND relationship='resolves'
+                        ORDER BY linked_at DESC,
+                                 linked_at_unix_ns IS NOT NULL DESC,
+                                 backlog_uid DESC
+                        LIMIT 1) IS NULL
+                       AND trace.created_at > (
+                           SELECT linked_at FROM story_backlog_link
+                           WHERE story_id=?1 AND relationship='resolves'
+                           ORDER BY linked_at DESC,
+                                    linked_at_unix_ns IS NOT NULL DESC,
+                                    backlog_uid DESC
+                           LIMIT 1
+                       )
+                   )
+               )
+             ORDER BY trace.id DESC
+             LIMIT 1;",
+            params![story_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (intake_uid, trace_uid) = proof.ok_or_else(|| {
+        HarnessInfraError::StoryCompletion(
+            "resolver stories require a completed linked implementation trace recorded after the newest resolver link"
+                .to_owned(),
+        )
+    })?;
+
+    let invalid_target: Option<(i64, String)> = connection
+        .query_row(
+            "SELECT backlog.id, backlog.status
+             FROM story_backlog_link AS link
+             JOIN backlog ON backlog.uid=link.backlog_uid
+             WHERE link.story_id=?1
+               AND link.relationship='resolves'
+               AND NOT (
+                   backlog.status='accepted'
+                   OR (
+                       backlog.status='implemented'
+                       AND json_extract(backlog.resolution_evidence, '$.story_id')=?1
+                   )
+               )
+             ORDER BY backlog.id
+             LIMIT 1;",
+            params![story_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((backlog_id, backlog_status)) = invalid_target {
+        return Err(HarnessInfraError::StoryCompletion(format!(
+            "resolver target #{backlog_id} is '{backlog_status}', not accepted or already completed by this story"
+        )));
+    }
+
+    Ok(StoryCompletionContext {
+        intake_uid: Some(intake_uid),
+        trace_uid: Some(trace_uid),
+    })
+}
+
+#[allow(clippy::type_complexity)]
+fn story_completion_links(
+    connection: &Connection,
+    story_id: &str,
+) -> Result<(Vec<(i64, String, Option<String>)>, Vec<i64>, Vec<i64>)> {
+    let mut accepted = connection.prepare(
+        "SELECT backlog.id, backlog.uid, backlog.outcome_schedule_kind
+         FROM story_backlog_link AS link
+         JOIN backlog ON backlog.uid=link.backlog_uid
+         WHERE link.story_id=?1 AND link.relationship='resolves' AND backlog.status='accepted'
+         ORDER BY backlog.id;",
+    )?;
+    let accepted = accepted
+        .query_map(params![story_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let mut already_closed = connection.prepare(
+        "SELECT backlog.id
+         FROM story_backlog_link AS link
+         JOIN backlog ON backlog.uid=link.backlog_uid
+         WHERE link.story_id=?1
+           AND link.relationship='resolves'
+           AND backlog.status='implemented'
+           AND json_extract(backlog.resolution_evidence, '$.story_id')=?1
+         ORDER BY backlog.id;",
+    )?;
+    let already_closed = already_closed
+        .query_map(params![story_id], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let mut references = connection.prepare(
+        "SELECT backlog.id
+         FROM story_backlog_link AS link
+         JOIN backlog ON backlog.uid=link.backlog_uid
+         WHERE link.story_id=?1 AND link.relationship='references'
+         ORDER BY backlog.id;",
+    )?;
+    let references = references
+        .query_map(params![story_id], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    Ok((accepted, already_closed, references))
+}
+
+fn linked_backlog(transaction: &Transaction<'_>, backlog_id: i64) -> Result<(String, String)> {
+    let row: Option<(Option<String>, String)> = transaction
+        .query_row(
+            "SELECT uid, status FROM backlog WHERE id=?1;",
+            params![backlog_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    match row {
+        None => Err(HarnessInfraError::StoryBacklogNotFound(backlog_id)),
+        Some((None, _)) => Err(HarnessInfraError::StoryBacklogLegacy(backlog_id)),
+        Some((Some(uid), status)) => Ok((uid, status)),
+    }
+}
+
+fn validate_resolver_mutation(
+    transaction: &Transaction<'_>,
+    story_id: &str,
+    backlog_id: i64,
+    backlog_status: &str,
+    story_status: &str,
+    backlog_uid: &str,
+) -> Result<()> {
+    if matches!(story_status, "implemented" | "retired") {
+        return Err(HarnessInfraError::StoryBacklogTerminalStory(
+            story_id.to_owned(),
+        ));
+    }
+    if backlog_status != "accepted" {
+        if matches!(backlog_status, "implemented" | "rejected") {
+            return Err(HarnessInfraError::StoryBacklogResolverImmutable(backlog_id));
+        }
+        return Err(HarnessInfraError::StoryBacklogResolverRequiresAccepted(
+            backlog_id,
+        ));
+    }
+    let resolver: Option<String> = transaction.query_row("SELECT story_id FROM story_backlog_link WHERE backlog_uid=?1 AND relationship='resolves' AND story_id<>?2;", params![backlog_uid, story_id], |row| row.get(0)).optional()?;
+    if let Some(resolver) = resolver {
+        return Err(HarnessInfraError::StoryBacklogResolverExists(
+            backlog_id, resolver,
+        ));
+    }
+    Ok(())
+}
+
+fn dependency_path_exists(transaction: &Transaction<'_>, from: &str, to: &str) -> Result<bool> {
+    transaction
+        .query_row(
+            "WITH RECURSIVE reachable(id) AS (
+                SELECT blocks_story_id FROM story_dependency WHERE story_id=?1
+                UNION
+                SELECT dependency.blocks_story_id
+                FROM story_dependency AS dependency
+                JOIN reachable ON dependency.story_id=reachable.id
+             )
+             SELECT 1 FROM reachable WHERE id=?2 LIMIT 1;",
+            params![from, to],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|value| value.is_some())
+        .map_err(HarnessInfraError::from)
+}
+
 fn required_string(value: &Value, field: &str) -> Result<String> {
     value
         .get(field)
@@ -2645,11 +5168,63 @@ fn required_string(value: &Value, field: &str) -> Result<String> {
         .ok_or_else(|| HarnessInfraError::InvalidChangeset(format!("missing string field {field}")))
 }
 
+fn required_uid(value: &Value, field: &str, prefix: &str) -> Result<String> {
+    let uid = required_string(value, field)?;
+    let valid = uid.strip_prefix(&format!("{prefix}_")).is_some_and(|hex| {
+        hex.len() == 32 && hex.chars().all(|character| character.is_ascii_hexdigit())
+    });
+    if valid {
+        Ok(uid)
+    } else {
+        Err(HarnessInfraError::InvalidChangeset(format!(
+            "invalid {prefix} uid in {field}"
+        )))
+    }
+}
+
+fn resolve_uid(
+    transaction: &Transaction<'_>,
+    uid: Option<String>,
+    table: &str,
+) -> Result<Option<i64>> {
+    let Some(uid) = uid else { return Ok(None) };
+    let sql = format!("SELECT id FROM {table} WHERE uid=?1");
+    transaction
+        .query_row(&sql, params![uid], |row| row.get(0))
+        .optional()?
+        .map(Some)
+        .ok_or_else(|| HarnessInfraError::InvalidChangeset(format!("unknown {table} uid")))
+}
+
 fn optional_string(value: &Value, field: &str) -> Option<String> {
     value
         .get(field)
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
+}
+
+fn canonical_sqlite_timestamp(value: String, field: &str) -> Result<String> {
+    let parsed = NaiveDateTime::parse_from_str(&value, "%Y-%m-%d %H:%M:%S").map_err(|_| {
+        HarnessInfraError::InvalidChangeset(format!(
+            "{field} must use YYYY-MM-DD HH:MM:SS, got '{value}'"
+        ))
+    })?;
+    if parsed.format("%Y-%m-%d %H:%M:%S").to_string() != value {
+        return Err(HarnessInfraError::InvalidChangeset(format!(
+            "{field} must use canonical YYYY-MM-DD HH:MM:SS, got '{value}'"
+        )));
+    }
+    Ok(value)
+}
+
+fn required_timestamp(value: &Value, field: &str) -> Result<String> {
+    canonical_sqlite_timestamp(required_string(value, field)?, field)
+}
+
+fn optional_timestamp(value: &Value, field: &str) -> Result<Option<String>> {
+    optional_string(value, field)
+        .map(|timestamp| canonical_sqlite_timestamp(timestamp, field))
+        .transpose()
 }
 
 fn required_i64(value: &Value, field: &str) -> Result<i64> {
@@ -2668,10 +5243,19 @@ mod tests {
 
     use super::*;
     use crate::application::{
-        BacklogAddInput, BacklogCloseInput, DecisionAddInput, IntakeInput, InterventionAddInput,
-        InterventionFilter, StoryAddInput, StoryUpdateInput, ToolRegisterInput, TraceInput,
+        BacklogAddInput, BacklogCloseInput, BacklogOutcomeInput, DecisionAddInput, IntakeInput,
+        InterventionAddInput, InterventionFilter, StoryAddInput, StoryDependencyInput,
+        StoryUpdateInput, ToolRegisterInput, TraceInput,
     };
     use crate::domain::{BacklogFilter, BoolFlag, CsvList, InputType, RiskLane, TraceQualityTier};
+
+    fn env_clean_verification_command() -> &'static str {
+        if cfg!(windows) {
+            "if defined HARNESS_RUN_ID (exit /b 1) else (if defined HARNESS_RUN_MODE (exit /b 1) else (if defined HARNESS_DB_PATH (exit /b 1) else (exit /b 0)))"
+        } else {
+            "test -z \"${HARNESS_RUN_ID-}\" && test -z \"${HARNESS_RUN_MODE-}\" && test -z \"${HARNESS_DB_PATH-}\""
+        }
+    }
 
     fn test_repository() -> (TempDir, SqliteHarnessRepository) {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -2705,6 +5289,134 @@ mod tests {
         (temp_dir, repository)
     }
 
+    fn passing_command() -> &'static str {
+        if cfg!(windows) {
+            "exit /b 0"
+        } else {
+            "exit 0"
+        }
+    }
+
+    fn failing_command() -> &'static str {
+        if cfg!(windows) {
+            "exit /b 1"
+        } else {
+            "exit 1"
+        }
+    }
+
+    fn record_proposal_friction(repository: &SqliteHarnessRepository, text: &str) {
+        repository
+            .record_trace(TraceInput {
+                task_summary: "Proposal recurrence fixture".to_owned(),
+                intake_id: None,
+                story_id: None,
+                agent: Some("codex".to_owned()),
+                outcome: Some("completed".to_owned()),
+                duration_seconds: None,
+                token_estimate: None,
+                friction: Some(text.to_owned()),
+                notes: None,
+                actions: CsvList::from_optional(Some("observe".to_owned())),
+                files_read: CsvList::from_optional(None),
+                files_changed: CsvList::from_optional(None),
+                decisions: CsvList::from_optional(None),
+                errors: CsvList::from_optional(None),
+            })
+            .unwrap();
+    }
+
+    fn seed_legacy_reconciliation_fixture(repository: &SqliteHarnessRepository, offset_ids: bool) {
+        let connection = repository.open_existing().unwrap();
+        if offset_ids {
+            connection
+                .execute("INSERT INTO trace (task_summary) VALUES ('offset');", [])
+                .unwrap();
+            connection.execute("INSERT INTO intervention (type, description, source) VALUES ('approval', 'offset', 'agent');", []).unwrap();
+            connection
+                .execute("INSERT INTO backlog (title) VALUES ('offset');", [])
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO trace (created_at, task_summary, harness_friction) VALUES
+                ('2026-01-01 00:00:01', 'legacy friction one', 'phase5 repeated smoke friction'),
+                ('2026-01-01 00:00:02', 'legacy friction two', 'phase5 repeated smoke friction');",
+                [],
+            )
+            .unwrap();
+        connection.execute(
+            "INSERT INTO intervention (created_at, type, description, source) VALUES
+                ('2026-01-01 00:00:03', 'correction', 'Use deterministic context scoring rules', 'human'),
+                ('2026-01-01 00:00:04', 'correction', 'Use deterministic context scoring rules', 'human');",
+            [],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO backlog (created_at, title, status, notes) VALUES
+                ('2026-01-01 00:00:05', 'Reduce repeated friction: phase5 repeated smoke friction', 'proposed', 'legacy generated row');",
+            [],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO backlog (created_at, title, status, actual_outcome, implemented_at, notes) VALUES
+                ('2026-01-01 00:00:06', 'Address repeated intervention: correction: Use deterministic context scoring rules', 'implemented', 'Kept the original legacy result', '2026-01-02 00:00:00', 'legacy generated terminal row');",
+            [],
+        ).unwrap();
+        connection
+            .execute(
+                "INSERT INTO backlog (created_at, title, status) VALUES
+                ('2026-01-01 00:00:07', 'Manual improvement with similar wording', 'proposed');",
+                [],
+            )
+            .unwrap();
+    }
+
+    fn add_completion_story(
+        repository: &SqliteHarnessRepository,
+        id: &str,
+        verify_command: Option<&str>,
+    ) {
+        repository
+            .add_story(StoryAddInput {
+                id: id.to_owned(),
+                title: "Completion fixture".to_owned(),
+                risk_lane: RiskLane::HighRisk,
+                contract_doc: None,
+                verify_command: verify_command.map(ToOwned::to_owned),
+                notes: None,
+            })
+            .unwrap();
+        repository
+            .update_story(StoryUpdateInput {
+                id: id.to_owned(),
+                status: Some("in_progress".to_owned()),
+                evidence: None,
+                unit: None,
+                integration: None,
+                e2e: None,
+                platform: None,
+                verify_command: None,
+            })
+            .unwrap();
+    }
+
+    fn seed_resolver_completion_fixture(
+        repository: &SqliteHarnessRepository,
+        story_id: &str,
+        verify_command: &str,
+    ) -> (i64, String, String) {
+        add_completion_story(repository, story_id, Some(verify_command));
+        let connection = repository.open_existing().unwrap();
+        let intake_uid = "ink_11111111111111111111111111111111".to_owned();
+        let trace_uid = "trc_22222222222222222222222222222222".to_owned();
+        let backlog_uid = "blg_33333333333333333333333333333333".to_owned();
+        connection.execute("INSERT INTO intake (uid, created_at, input_type, summary, risk_lane, story_id) VALUES (?1, '2026-01-01 00:00:00', 'harness_improvement', 'completion fixture', 'high_risk', ?2);", params![intake_uid, story_id]).unwrap();
+        connection.execute("INSERT INTO backlog (uid, title, status, risk, outcome_schedule_kind, outcome_after_traces) VALUES (?1, 'accepted resolver', 'accepted', 'high_risk', 'trace_count', 5);", params![backlog_uid]).unwrap();
+        let backlog_id = connection.last_insert_rowid();
+        connection.execute("INSERT INTO story_backlog_link (story_id, backlog_uid, relationship, linked_at) VALUES (?1, ?2, 'resolves', '2026-01-02 00:00:00');", params![story_id, backlog_uid]).unwrap();
+        connection.execute("INSERT INTO trace (uid, created_at, intake_uid, task_summary, story_id, actions_taken, files_changed, outcome) VALUES (?1, '2026-01-03 00:00:00', ?2, 'completed implementation trace', ?3, '[\"implemented\"]', '[\"src.rs\"]', 'completed');", params![trace_uid, intake_uid, story_id]).unwrap();
+        (backlog_id, intake_uid, trace_uid)
+    }
+
     fn story_columns(connection: &Connection) -> Vec<String> {
         let mut statement = connection.prepare("PRAGMA table_info(story);").unwrap();
         let rows = statement
@@ -2723,7 +5435,7 @@ mod tests {
         assert_eq!(repository.query_stats().unwrap().intakes, 0);
         let connection = repository.open_existing().unwrap();
         let schema_version = SqliteHarnessRepository::schema_version(&connection).unwrap();
-        assert_eq!(schema_version, 8);
+        assert_eq!(schema_version, 12);
         let story_columns = story_columns(&connection);
         assert!(story_columns.contains(&"verify_command".to_owned()));
         assert!(story_columns.contains(&"last_verified_at".to_owned()));
@@ -2744,6 +5456,305 @@ mod tests {
             )
             .is_ok();
         assert!(hierarchy_table_exists);
+    }
+
+    #[test]
+    fn legacy_proposal_reconciliation_migrates_an_existing_v10_database() {
+        let (_temp_dir, repository) = test_repository();
+        let connection = repository.open_or_create().unwrap();
+        repository.apply_schema_v1(&connection).unwrap();
+        for (version, path) in repository.migration_files().unwrap() {
+            if (2..=10).contains(&version) {
+                connection
+                    .execute_batch(&fs::read_to_string(path).unwrap())
+                    .unwrap();
+            }
+        }
+        drop(connection);
+
+        let result = repository.migrate().unwrap();
+        assert_eq!(result.applied, vec![11, 12]);
+        let connection = repository.open_existing().unwrap();
+        assert_eq!(
+            SqliteHarnessRepository::schema_version(&connection).unwrap(),
+            12
+        );
+        assert!(connection
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_evidence_snapshot';",
+                [],
+                |_| Ok(())
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn post_review_migration_backfills_exact_legacy_rejection_reason() {
+        let (temp_dir, repository) = test_repository();
+        let connection = repository.open_or_create().unwrap();
+        repository.apply_schema_v1(&connection).unwrap();
+        for (version, path) in repository.migration_files().unwrap() {
+            if (2..=11).contains(&version) {
+                connection
+                    .execute_batch(&fs::read_to_string(path).unwrap())
+                    .unwrap();
+            }
+        }
+        connection.execute(
+            "INSERT INTO backlog (
+                uid, proposal_key, occurrence_kind, title, status, notes
+             ) VALUES (
+                'blg_99999999999999999999999999999999',
+                'prp_99999999999999999999999999999999',
+                'original', 'legacy rejection', 'rejected',
+                'covered_evidence: old fixture\nrejection_reason: not useful yet\nrejection_reason: ignored duplicate'
+             )",
+            [],
+        ).unwrap();
+        drop(connection);
+
+        assert_eq!(repository.migrate().unwrap().applied, vec![12]);
+        let connection = repository.open_existing().unwrap();
+        let reason: Option<String> = connection
+            .query_row(
+                "SELECT rejection_reason FROM backlog WHERE proposal_key='prp_99999999999999999999999999999999'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason.as_deref(), Some("not useful yet"));
+
+        let replay_root = temp_dir.path().join("rejection-replay");
+        fs::create_dir_all(&replay_root).unwrap();
+        let replay = SqliteHarnessRepository::new(
+            replay_root.clone(),
+            replay_root.join("harness.db"),
+            repository.schema_dir.clone(),
+        );
+        replay.init().unwrap();
+        let changeset = temp_dir.path().join("rejection.changeset.jsonl");
+        fs::write(
+            &changeset,
+            r#"{"op":"changeset.header","version":1,"run_id":"run_rejection_parity","base_schema_version":11}
+{"op":"backlog.proposal.decision","version":2,"uid":"blg_99999999999999999999999999999999","payload":{"proposal_key":"prp_99999999999999999999999999999999","occurrence_kind":"original","title":"legacy rejection","status":"rejected","notes":"covered_evidence: old fixture\nrejection_reason: not useful yet\nrejection_reason: ignored duplicate","rejection_reason":"not useful yet","evidence":[]}}
+"#,
+        )
+        .unwrap();
+        replay.apply_changeset(&changeset).unwrap();
+        let replay_reason: Option<String> = replay
+            .open_existing()
+            .unwrap()
+            .query_row(
+                "SELECT rejection_reason FROM backlog WHERE proposal_key='prp_99999999999999999999999999999999'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(replay_reason, reason);
+    }
+
+    #[test]
+    fn semantic_integrity_rejects_noncanonical_timestamps_across_operation_families() {
+        assert_eq!(
+            canonical_sqlite_timestamp("2099-01-02 03:04:05".to_owned(), "time").unwrap(),
+            "2099-01-02 03:04:05"
+        );
+        for invalid in ["garbage", "2099-1-2 3:4:5", "2099-02-30 03:04:05"] {
+            assert!(canonical_sqlite_timestamp(invalid.to_owned(), "time").is_err());
+        }
+
+        let (temp_dir, repository) = isolated_test_repository();
+        repository.init().unwrap();
+        add_completion_story(&repository, "US-TIME-LINK", Some(passing_command()));
+        repository.open_existing().unwrap().execute(
+            "INSERT INTO backlog (uid, title, status) VALUES ('blg_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 'time link', 'accepted')",
+            [],
+        ).unwrap();
+        let operations = vec![
+            json!({"op":"intake.add","version":2,"uid":"ink_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","payload":{"created_at":"garbage","input_type":"harness_improvement","summary":"bad","risk_lane":"high_risk"}}),
+            json!({"op":"backlog.add","version":2,"uid":"blg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","payload":{"created_at":"garbage","title":"bad"}}),
+            json!({"op":"intervention.add","version":2,"uid":"int_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","payload":{"created_at":"garbage","type":"correction","description":"bad","source":"agent"}}),
+            json!({"op":"trace.add","version":2,"uid":"trc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","payload":{"created_at":"garbage","task_summary":"bad"}}),
+            json!({"op":"story.backlog.link","version":2,"id":"US-TIME-LINK","payload":{"backlog_uid":"blg_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","relationship":"resolves","linked_at":"garbage","linked_at_unix_ns":1}}),
+            json!({"op":"story.verify","version":2,"id":"US-NONE","payload":{"result":"pass","verified_at":"garbage"}}),
+            json!({"op":"story.complete","version":2,"id":"US-NONE","payload":{"result":"pass","completed_at":"garbage"}}),
+            json!({"op":"backlog.complete","version":2,"uid":"blg_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","payload":{"story_id":"US-NONE","completed_at":"garbage"}}),
+            json!({"op":"backlog.outcome.observe","version":2,"uid":"obs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","payload":{"backlog_uid":"blg_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","ordinal":1,"status":"confirmed","outcome":"bad","observed_at":"garbage"}}),
+            json!({"op":"backlog.proposal.decision","version":2,"uid":"blg_cccccccccccccccccccccccccccccccc","payload":{"proposal_key":"prp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","occurrence_kind":"original","title":"bad","status":"accepted","accepted_at":"garbage","evidence":[]}}),
+            json!({"op":"backlog.proposal.decision","version":2,"uid":"blg_dddddddddddddddddddddddddddddddd","payload":{"proposal_key":"prp_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","occurrence_kind":"original","title":"bad evidence time","status":"accepted","accepted_at":"2099-01-02 03:04:05","evidence":[{"source_kind":"trace","evidence_uid":"trc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","evidence_fingerprint":"bad","observed_at":"garbage"}]}}),
+            json!({"op":"legacy.evidence.capture","version":1,"uid":"leg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","payload":{"source_kind":"trace","evidence_fingerprint":"bad","canonical_payload":"{}","captured_at":"garbage"}}),
+            json!({"op":"audit.evidence.open","version":1,"uid":"aud_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","payload":{"finding_key":"audit.bad","evidence_fingerprint":"bad","opened_at":"garbage"}}),
+            json!({"op":"audit.evidence.clear","version":1,"uid":"aud_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","payload":{"cleared_at":"garbage"}}),
+        ];
+        for (index, operation) in operations.into_iter().enumerate() {
+            let path = temp_dir.path().join(format!("invalid-{index}.jsonl"));
+            fs::write(
+                &path,
+                format!(
+                    "{}\n{}\n",
+                    json!({"op":"changeset.header","version":1,"run_id":format!("run_invalid_{index}"),"base_schema_version":12}),
+                    operation
+                ),
+            )
+            .unwrap();
+            let error = repository.apply_changeset(&path).unwrap_err();
+            assert!(
+                matches!(&error, HarnessInfraError::InvalidChangeset(message) if message.contains("YYYY-MM-DD HH:MM:SS")),
+                "operation {index} failed outside timestamp validation: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_proposal_reconciliation_is_conservative_replayable_and_idempotent() {
+        let (_temp_dir, repository) = isolated_test_repository();
+        let repository = repository.with_run_id("run_legacy_reconciliation");
+        repository.init().unwrap();
+        seed_legacy_reconciliation_fixture(&repository, false);
+
+        let changeset = repository.changeset_path("run_legacy_reconciliation");
+        let dry_run = repository.reconcile_legacy_improvements(false).unwrap();
+        assert!(!dry_run.applied);
+        assert_eq!(dry_run.changed, 2);
+        assert_eq!(
+            dry_run
+                .records
+                .iter()
+                .map(|record| record.classification.as_str())
+                .collect::<Vec<_>>(),
+            vec!["derivable", "derivable", "manual"]
+        );
+        assert!(!changeset.exists());
+        let connection = repository.open_existing().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM backlog WHERE proposal_key IS NOT NULL;",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        drop(connection);
+
+        let applied = repository.reconcile_legacy_improvements(true).unwrap();
+        assert!(applied.applied);
+        assert_eq!(applied.changed, 2);
+        assert!(applied.trace_id.is_some());
+        let connection = repository.open_existing().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM legacy_evidence_snapshot;",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            connection.query_row("SELECT COUNT(*) FROM proposal_evidence_link WHERE source_kind='legacy_snapshot';", [], |row| row.get::<_, i64>(0)).unwrap(),
+            4
+        );
+        assert_eq!(
+            connection.query_row("SELECT COUNT(*) FROM backlog_outcome_observation WHERE status='legacy_recorded' AND outcome='Kept the original legacy result';", [], |row| row.get::<_, i64>(0)).unwrap(),
+            1
+        );
+        let terminal: (String, String, String) = connection.query_row(
+            "SELECT status, actual_outcome, implemented_at FROM backlog WHERE title='Address repeated intervention: correction: Use deterministic context scoring rules';",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(
+            terminal,
+            (
+                "implemented".to_owned(),
+                "Kept the original legacy result".to_owned(),
+                "2026-01-02 00:00:00".to_owned()
+            )
+        );
+        let trace_count: i64 = connection.query_row("SELECT COUNT(*) FROM trace WHERE agent='harness-cli' AND task_summary LIKE 'Reconciled % legacy improvement row(s)';", [], |row| row.get(0)).unwrap();
+        assert_eq!(trace_count, 1);
+        drop(connection);
+
+        let no_op = repository.reconcile_legacy_improvements(true).unwrap();
+        assert_eq!(no_op.changed, 0);
+        assert!(no_op.trace_id.is_none());
+        assert_eq!(
+            repository.open_existing().unwrap().query_row("SELECT COUNT(*) FROM trace WHERE agent='harness-cli' AND task_summary LIKE 'Reconciled % legacy improvement row(s)';", [], |row| row.get::<_, i64>(0)).unwrap(),
+            1
+        );
+
+        let replay_temp = tempfile::tempdir().unwrap();
+        let replay_root = replay_temp.path().join("repo");
+        fs::create_dir_all(&replay_root).unwrap();
+        let replay = SqliteHarnessRepository::new(
+            replay_root.clone(),
+            replay_root.join("harness.db"),
+            repository.schema_dir.clone(),
+        );
+        replay.init().unwrap();
+        seed_legacy_reconciliation_fixture(&replay, true);
+        let replay_result = replay.apply_changeset(&changeset).unwrap();
+        assert!(replay_result.applied);
+        let replay_connection = replay.open_existing().unwrap();
+        assert_eq!(
+            replay_connection
+                .query_row(
+                    "SELECT COUNT(*) FROM backlog WHERE proposal_key IS NOT NULL;",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            replay_connection
+                .query_row(
+                    "SELECT COUNT(*) FROM legacy_evidence_snapshot;",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            replay_connection.query_row("SELECT COUNT(*) FROM backlog_outcome_observation WHERE status='legacy_recorded';", [], |row| row.get::<_, i64>(0)).unwrap(),
+            1
+        );
+
+        let fresh_temp = tempfile::tempdir().unwrap();
+        let fresh_root = fresh_temp.path().join("repo");
+        fs::create_dir_all(&fresh_root).unwrap();
+        let fresh = SqliteHarnessRepository::new(
+            fresh_root.clone(),
+            fresh_root.join("harness.db"),
+            repository.schema_dir.clone(),
+        );
+        fresh.init().unwrap();
+        assert!(fresh.apply_changeset(&changeset).unwrap().applied);
+        let fresh_connection = fresh.open_existing().unwrap();
+        assert_eq!(
+            fresh_connection
+                .query_row(
+                    "SELECT COUNT(*) FROM backlog WHERE proposal_key IS NOT NULL;",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            fresh_connection
+                .query_row(
+                    "SELECT COUNT(*) FROM legacy_evidence_snapshot;",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            4
+        );
     }
 
     #[test]
@@ -2782,7 +5793,7 @@ mod tests {
         let header: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(header["op"], "changeset.header");
         assert_eq!(header["run_id"], "run_test");
-        assert_eq!(header["base_schema_version"], 8);
+        assert_eq!(header["base_schema_version"], 12);
         let operation: Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(operation["op"], "intake.add");
         assert_eq!(operation["payload"]["summary"], "Logged write test");
@@ -2793,6 +5804,204 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn story_dependency_command_validates_mutation_and_query_contract() {
+        let (_temp_dir, repository) = isolated_test_repository();
+        repository.init().unwrap();
+        for id in ["US-A", "US-B", "US-C"] {
+            repository
+                .add_story(StoryAddInput {
+                    id: id.to_owned(),
+                    title: id.to_owned(),
+                    risk_lane: RiskLane::Normal,
+                    contract_doc: None,
+                    verify_command: None,
+                    notes: None,
+                })
+                .unwrap();
+        }
+
+        assert!(repository
+            .add_story_dependency(StoryDependencyInput {
+                blocker: "US-A".to_owned(),
+                blocked: "US-B".to_owned(),
+            })
+            .unwrap());
+        assert!(!repository
+            .add_story_dependency(StoryDependencyInput {
+                blocker: "US-A".to_owned(),
+                blocked: "US-B".to_owned(),
+            })
+            .unwrap());
+        assert!(matches!(
+            repository.add_story_dependency(StoryDependencyInput {
+                blocker: "US-MISSING".to_owned(),
+                blocked: "US-B".to_owned(),
+            }),
+            Err(HarnessInfraError::StoryNotFound(id)) if id == "US-MISSING"
+        ));
+        assert!(matches!(
+            repository.add_story_dependency(StoryDependencyInput {
+                blocker: "US-A".to_owned(),
+                blocked: "US-A".to_owned(),
+            }),
+            Err(HarnessInfraError::StoryDependencySelf(id)) if id == "US-A"
+        ));
+        assert!(repository
+            .add_story_dependency(StoryDependencyInput {
+                blocker: "US-B".to_owned(),
+                blocked: "US-C".to_owned(),
+            })
+            .unwrap());
+        assert!(matches!(
+            repository.add_story_dependency(StoryDependencyInput {
+                blocker: "US-C".to_owned(),
+                blocked: "US-A".to_owned(),
+            }),
+            Err(HarnessInfraError::StoryDependencyCycle(blocker, blocked))
+                if blocker == "US-C" && blocked == "US-A"
+        ));
+
+        assert_eq!(
+            repository.query_story_dependencies(None).unwrap(),
+            vec![
+                StoryDependencyRecord {
+                    blocker: "US-A".to_owned(),
+                    blocked: "US-B".to_owned(),
+                },
+                StoryDependencyRecord {
+                    blocker: "US-B".to_owned(),
+                    blocked: "US-C".to_owned(),
+                },
+            ]
+        );
+        assert!(repository
+            .remove_story_dependency(StoryDependencyInput {
+                blocker: "US-A".to_owned(),
+                blocked: "US-B".to_owned(),
+            })
+            .unwrap());
+        assert!(!repository
+            .remove_story_dependency(StoryDependencyInput {
+                blocker: "US-A".to_owned(),
+                blocked: "US-B".to_owned(),
+            })
+            .unwrap());
+    }
+
+    #[test]
+    fn story_dependency_changeset_replays_idempotently() {
+        let (temp_dir, repository) = isolated_test_repository();
+        repository.init().unwrap();
+        let changeset_path = temp_dir.path().join("dependency.changeset.jsonl");
+        fs::write(
+            &changeset_path,
+            r#"{"op":"changeset.header","version":1,"run_id":"run_dependency","base_schema_version":8}
+{"op":"story.add","version":1,"id":"US-A","payload":{"title":"A","risk_lane":"normal","contract_doc":null,"verify_command":null,"notes":null}}
+{"op":"story.add","version":1,"id":"US-B","payload":{"title":"B","risk_lane":"normal","contract_doc":null,"verify_command":null,"notes":null}}
+{"op":"story.dependency.add","version":1,"id":"US-A","payload":{"blocked":"US-B"}}
+{"op":"story.dependency.remove","version":1,"id":"US-A","payload":{"blocked":"US-B"}}
+{"op":"story.dependency.add","version":1,"id":"US-A","payload":{"blocked":"US-B"}}
+"#,
+        )
+        .unwrap();
+
+        assert!(repository.apply_changeset(&changeset_path).unwrap().applied);
+        assert!(!repository.apply_changeset(&changeset_path).unwrap().applied);
+        assert_eq!(
+            repository.query_story_dependencies(None).unwrap(),
+            vec![StoryDependencyRecord {
+                blocker: "US-A".to_owned(),
+                blocked: "US-B".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn story_backlog_relationship_validates_authority_and_replays() {
+        let (temp_dir, repository) = isolated_test_repository();
+        repository.init().unwrap();
+        for id in ["US-A", "US-B", "US-C"] {
+            repository
+                .add_story(StoryAddInput {
+                    id: id.to_owned(),
+                    title: id.to_owned(),
+                    risk_lane: RiskLane::Normal,
+                    contract_doc: None,
+                    verify_command: Some("true".to_owned()),
+                    notes: None,
+                })
+                .unwrap();
+        }
+        let connection = repository.open_existing().unwrap();
+        connection.execute("INSERT INTO backlog (uid, title, status) VALUES ('blg_11111111111111111111111111111111', 'Accepted', 'accepted'), ('blg_22222222222222222222222222222222', 'Open', 'proposed');", []).unwrap();
+        let accepted_id: i64 = connection
+            .query_row(
+                "SELECT id FROM backlog WHERE uid='blg_11111111111111111111111111111111';",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let open_id: i64 = connection
+            .query_row(
+                "SELECT id FROM backlog WHERE uid='blg_22222222222222222222222222222222';",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(repository
+            .link_story_backlog(StoryBacklogLinkInput {
+                story_id: "US-A".to_owned(),
+                backlog_id: accepted_id,
+                relationship: "resolves".to_owned()
+            })
+            .unwrap());
+        assert!(!repository
+            .link_story_backlog(StoryBacklogLinkInput {
+                story_id: "US-A".to_owned(),
+                backlog_id: accepted_id,
+                relationship: "resolves".to_owned()
+            })
+            .unwrap());
+        assert!(
+            matches!(repository.link_story_backlog(StoryBacklogLinkInput { story_id: "US-B".to_owned(), backlog_id: accepted_id, relationship: "resolves".to_owned() }), Err(HarnessInfraError::StoryBacklogResolverExists(id, story)) if id == accepted_id && story == "US-A")
+        );
+        assert!(repository
+            .link_story_backlog(StoryBacklogLinkInput {
+                story_id: "US-B".to_owned(),
+                backlog_id: accepted_id,
+                relationship: "references".to_owned()
+            })
+            .unwrap());
+        assert!(
+            matches!(repository.link_story_backlog(StoryBacklogLinkInput { story_id: "US-C".to_owned(), backlog_id: open_id, relationship: "resolves".to_owned() }), Err(HarnessInfraError::StoryBacklogResolverRequiresAccepted(id)) if id == open_id)
+        );
+        assert_eq!(
+            repository
+                .query_story_backlog_links(None, Some(accepted_id))
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(repository
+            .unlink_story_backlog("US-B", accepted_id)
+            .unwrap());
+
+        let changeset_path = temp_dir.path().join("relationship.changeset.jsonl");
+        fs::write(&changeset_path, r#"{"op":"changeset.header","version":1,"run_id":"run_relationship","base_schema_version":10}
+{"op":"story.backlog.link","version":1,"id":"US-B","payload":{"backlog_uid":"blg_11111111111111111111111111111111","relationship":"references"}}
+"#).unwrap();
+        assert!(repository.apply_changeset(&changeset_path).unwrap().applied);
+        assert!(!repository.apply_changeset(&changeset_path).unwrap().applied);
+        assert_eq!(
+            repository
+                .query_story_backlog_links(Some("US-B"), Some(accepted_id))
+                .unwrap()[0]
+                .relationship,
+            "references"
+        );
     }
 
     #[test]
@@ -2867,6 +6076,64 @@ mod tests {
     }
 
     #[test]
+    fn apply_changeset_accepts_already_materialized_stable_records() {
+        let (_temp_dir, mut repository) = isolated_test_repository();
+        repository.init().unwrap();
+        repository.run_id_override = Some("run_materialized".to_owned());
+        let intake_id = repository
+            .record_intake(IntakeInput {
+                input_type: InputType::HarnessImprovement,
+                summary: "Materialized intake replay".to_owned(),
+                risk_lane: RiskLane::HighRisk,
+                risk_flags: CsvList::from_optional(None),
+                affected_docs: CsvList::from_optional(None),
+                story_id: None,
+                notes: None,
+            })
+            .unwrap();
+        repository
+            .record_trace(TraceInput {
+                task_summary: "Materialized trace replay".to_owned(),
+                intake_id: Some(intake_id),
+                story_id: None,
+                agent: Some("codex".to_owned()),
+                outcome: Some("completed".to_owned()),
+                duration_seconds: None,
+                token_estimate: None,
+                friction: Some("none".to_owned()),
+                notes: None,
+                actions: CsvList::from_optional(Some("implemented".to_owned())),
+                files_read: CsvList::from_optional(None),
+                files_changed: CsvList::from_optional(Some("src.rs".to_owned())),
+                decisions: CsvList::from_optional(None),
+                errors: CsvList::from_optional(None),
+            })
+            .unwrap();
+        let changeset_path = repository.changeset_path("run_materialized");
+        repository.run_id_override = None;
+
+        let applied = repository.apply_changeset(&changeset_path).unwrap();
+
+        assert!(applied.applied);
+        assert_eq!(applied.operations, 2);
+        let connection = repository.open_existing().unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM intake;", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM trace;", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn apply_changeset_migrates_existing_database_before_idempotency_check() {
         let (temp_dir, repository) = isolated_test_repository();
         let connection = repository.open_or_create().unwrap();
@@ -2902,7 +6169,7 @@ mod tests {
         let connection = repository.open_existing().unwrap();
         assert_eq!(
             SqliteHarnessRepository::schema_version(&connection).unwrap(),
-            8
+            12
         );
         let applied = connection
             .query_row(
@@ -3013,11 +6280,11 @@ mod tests {
         let result = repository.migrate().unwrap();
 
         assert_eq!(result.current_version, 1);
-        assert_eq!(result.applied, vec![2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(result.applied, vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
         let connection = repository.open_existing().unwrap();
         assert_eq!(
             SqliteHarnessRepository::schema_version(&connection).unwrap(),
-            8
+            12
         );
         let story_columns = story_columns(&connection);
         assert!(story_columns.contains(&"verify_command".to_owned()));
@@ -3067,7 +6334,10 @@ mod tests {
         drop(connection);
 
         // Upgrade: migration 005 must infer kind from the command prefix.
-        assert_eq!(repository.migrate().unwrap().applied, vec![5, 6, 7, 8]);
+        assert_eq!(
+            repository.migrate().unwrap().applied,
+            vec![5, 6, 7, 8, 9, 10, 11, 12]
+        );
         let connection = repository.open_existing().unwrap();
         let kind_of = |name: &str| -> String {
             connection
@@ -3210,6 +6480,327 @@ mod tests {
     }
 
     #[test]
+    fn story_completion_rejects_ineligible_story_states_before_verification() {
+        let (_temp_dir, repository) = isolated_test_repository();
+        repository.init().unwrap();
+        repository
+            .add_story(StoryAddInput {
+                id: "US-PLANNED".to_owned(),
+                title: "Planned".to_owned(),
+                risk_lane: RiskLane::HighRisk,
+                contract_doc: None,
+                verify_command: Some(passing_command().to_owned()),
+                notes: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            repository.complete_story("US-PLANNED"),
+            Err(HarnessInfraError::StoryCompletion(message)) if message.contains("planned")
+        ));
+
+        add_completion_story(&repository, "US-RETIRED", Some(passing_command()));
+        repository
+            .update_story(StoryUpdateInput {
+                id: "US-RETIRED".to_owned(),
+                status: Some("retired".to_owned()),
+                evidence: None,
+                unit: None,
+                integration: None,
+                e2e: None,
+                platform: None,
+                verify_command: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            repository.complete_story("US-RETIRED"),
+            Err(HarnessInfraError::StoryCompletion(message)) if message.contains("retired")
+        ));
+
+        add_completion_story(&repository, "US-NO-VERIFY", None);
+        assert!(matches!(
+            repository.complete_story("US-NO-VERIFY"),
+            Err(HarnessInfraError::MissingStoryVerifyCommand(id)) if id == "US-NO-VERIFY"
+        ));
+        assert!(matches!(
+            repository.complete_story("US-MISSING"),
+            Err(HarnessInfraError::StoryNotFound(id)) if id == "US-MISSING"
+        ));
+    }
+
+    #[test]
+    fn story_completion_requires_stable_intake_and_post_link_trace() {
+        let (_temp_dir, repository) = isolated_test_repository();
+        repository.init().unwrap();
+        add_completion_story(&repository, "US-COMPLETE", Some(passing_command()));
+        let connection = repository.open_existing().unwrap();
+        connection.execute("INSERT INTO backlog (uid, title, status) VALUES ('blg_33333333333333333333333333333333', 'resolver', 'accepted');", []).unwrap();
+        connection.execute("INSERT INTO story_backlog_link (story_id, backlog_uid, relationship, linked_at) VALUES ('US-COMPLETE', 'blg_33333333333333333333333333333333', 'resolves', '2026-01-02 00:00:00');", []).unwrap();
+
+        assert!(
+            matches!(repository.complete_story("US-COMPLETE"), Err(HarnessInfraError::StoryCompletion(message)) if message.contains("linked harness_improvement intake"))
+        );
+
+        connection.execute("INSERT INTO intake (uid, created_at, input_type, summary, risk_lane, story_id) VALUES ('ink_11111111111111111111111111111111', '2026-01-01 00:00:00', 'harness_improvement', 'fixture', 'high_risk', 'US-COMPLETE');", []).unwrap();
+        connection.execute("INSERT INTO trace (created_at, intake_id, task_summary, story_id, actions_taken, files_changed, outcome) VALUES ('2026-01-03 00:00:00', 1, 'local id only', 'US-COMPLETE', '[\"work\"]', '[\"src.rs\"]', 'completed');", []).unwrap();
+        connection.execute("INSERT INTO trace (uid, created_at, intake_uid, task_summary, story_id, actions_taken, files_changed, outcome) VALUES ('trc_22222222222222222222222222222222', '2026-01-01 00:00:00', 'ink_11111111111111111111111111111111', 'too early', 'US-COMPLETE', '[\"work\"]', '[\"src.rs\"]', 'completed');", []).unwrap();
+        connection.execute("INSERT INTO trace (uid, created_at, intake_uid, task_summary, story_id, actions_taken, files_changed, outcome) VALUES ('trc_33333333333333333333333333333333', '2026-01-03 00:00:00', 'ink_11111111111111111111111111111111', 'incomplete trace', 'US-COMPLETE', '[]', '[\"src.rs\"]', 'completed');", []).unwrap();
+        connection.execute("INSERT INTO trace (uid, created_at, intake_uid, task_summary, story_id, actions_taken, files_changed, outcome) VALUES ('trc_66666666666666666666666666666666', '2026-01-03 00:00:00', 'ink_11111111111111111111111111111111', 'failed trace', 'US-COMPLETE', '[\"work\"]', '[\"src.rs\"]', 'failed');", []).unwrap();
+        assert!(
+            matches!(repository.complete_story("US-COMPLETE"), Err(HarnessInfraError::StoryCompletion(message)) if message.contains("after the newest resolver link"))
+        );
+
+        connection.execute("INSERT INTO trace (uid, created_at, intake_uid, task_summary, story_id, actions_taken, files_changed, outcome) VALUES ('trc_44444444444444444444444444444444', '2026-01-03 00:00:00', 'ink_11111111111111111111111111111111', 'qualifying trace', 'US-COMPLETE', '[\"work\"]', '[\"src.rs\"]', 'completed');", []).unwrap();
+        connection.execute("INSERT INTO intake (uid, created_at, input_type, summary, risk_lane, story_id) VALUES ('ink_55555555555555555555555555555555', '2026-01-04 00:00:00', 'harness_improvement', 'newer intake without trace', 'high_risk', 'US-COMPLETE');", []).unwrap();
+
+        let result = repository.complete_story("US-COMPLETE").unwrap();
+        assert_eq!(result.result, "pass");
+        assert_eq!(
+            result.intake_uid.as_deref(),
+            Some("ink_11111111111111111111111111111111")
+        );
+        assert_eq!(
+            result.implementation_trace_uid.as_deref(),
+            Some("trc_44444444444444444444444444444444")
+        );
+    }
+
+    #[test]
+    fn story_completion_atomically_closes_resolvers_and_replays_exact_evidence() {
+        let (temp_dir, mut repository) = isolated_test_repository();
+        repository.init().unwrap();
+        let (first_id, intake_uid, trace_uid) =
+            seed_resolver_completion_fixture(&repository, "US-COMPLETE", passing_command());
+        let connection = repository.open_existing().unwrap();
+        connection.execute("INSERT INTO backlog (uid, title, status, outcome_schedule_kind) VALUES ('blg_44444444444444444444444444444444', 'second resolver', 'accepted', 'manual');", []).unwrap();
+        let second_id = connection.last_insert_rowid();
+        connection.execute("INSERT INTO story_backlog_link (story_id, backlog_uid, relationship, linked_at) VALUES ('US-COMPLETE', 'blg_44444444444444444444444444444444', 'resolves', '2026-01-02 00:00:00');", []).unwrap();
+        connection.execute("INSERT INTO backlog (uid, title, status, resolution_evidence) VALUES ('blg_55555555555555555555555555555555', 'self closed', 'implemented', '{\"story_id\":\"US-COMPLETE\",\"result\":\"pass\"}');", []).unwrap();
+        let self_closed_id = connection.last_insert_rowid();
+        connection.execute("INSERT INTO story_backlog_link (story_id, backlog_uid, relationship, linked_at) VALUES ('US-COMPLETE', 'blg_55555555555555555555555555555555', 'resolves', '2026-01-02 00:00:00');", []).unwrap();
+        connection.execute("INSERT INTO backlog (uid, title, status) VALUES ('blg_66666666666666666666666666666666', 'reference only', 'proposed');", []).unwrap();
+        let reference_id = connection.last_insert_rowid();
+        connection.execute("INSERT INTO story_backlog_link (story_id, backlog_uid, relationship, linked_at) VALUES ('US-COMPLETE', 'blg_66666666666666666666666666666666', 'references', '2026-01-02 00:00:00');", []).unwrap();
+
+        repository.run_id_override = Some("run_completion_replay".to_owned());
+        let result = repository.complete_story("US-COMPLETE").unwrap();
+        let changeset_path = repository.changeset_path("run_completion_replay");
+        let first_changeset_len = fs::metadata(&changeset_path).unwrap().len();
+        let repeated = repository.complete_story("US-COMPLETE").unwrap();
+        assert_eq!(
+            fs::metadata(&changeset_path).unwrap().len(),
+            first_changeset_len
+        );
+
+        assert_eq!(result.result, "pass");
+        assert_eq!(result.intake_uid.as_deref(), Some(intake_uid.as_str()));
+        assert_eq!(
+            result.implementation_trace_uid.as_deref(),
+            Some(trace_uid.as_str())
+        );
+        assert_eq!(result.closed_backlog_ids, vec![first_id, second_id]);
+        assert_eq!(result.already_closed_backlog_ids, vec![self_closed_id]);
+        assert_eq!(result.referenced_backlog_ids, vec![reference_id]);
+        assert_eq!(repeated.result, "already-completed");
+        assert_eq!(
+            repeated.already_closed_backlog_ids,
+            vec![first_id, second_id, self_closed_id]
+        );
+
+        let live: (String, Option<i64>, Option<String>, String) = connection.query_row("SELECT resolution_evidence, outcome_baseline_trace_count, actual_outcome, closed_at FROM backlog WHERE id=?1;", params![first_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
+        let live_verified_at: String = connection
+            .query_row(
+                "SELECT last_verified_at FROM story WHERE id='US-COMPLETE'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(live.0.contains("completion_uid"));
+        assert!(live.0.contains("completed_at"));
+        assert!(live.0.contains("verify_command"));
+        assert_eq!(live.1, Some(1));
+        assert_eq!(live.2, None);
+        let reference_status: String = connection
+            .query_row(
+                "SELECT status FROM backlog WHERE id=?1;",
+                params![reference_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reference_status, "proposed");
+
+        repository.run_id_override = None;
+        repository
+            .update_story(StoryUpdateInput {
+                id: "US-COMPLETE".to_owned(),
+                status: None,
+                evidence: None,
+                unit: None,
+                integration: None,
+                e2e: None,
+                platform: None,
+                verify_command: Some(failing_command().to_owned()),
+            })
+            .unwrap();
+        assert_eq!(
+            repository.verify_story("US-COMPLETE").unwrap().result,
+            "fail"
+        );
+        let post_failure: (String, String) = connection
+            .query_row(
+                "SELECT story.status, backlog.resolution_evidence FROM story JOIN story_backlog_link AS link ON link.story_id=story.id JOIN backlog ON backlog.uid=link.backlog_uid WHERE story.id='US-COMPLETE' AND backlog.id=?1;",
+                params![first_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(post_failure, ("implemented".to_owned(), live.0.clone()));
+
+        let changeset = fs::read_to_string(&changeset_path).unwrap();
+        assert!(changeset.contains("\"op\":\"story.complete\""));
+        assert_eq!(changeset.matches("\"op\":\"backlog.complete\"").count(), 2);
+        assert!(changeset.contains("resolution_evidence"));
+
+        let replay_root = temp_dir.path().join("replay");
+        fs::create_dir_all(&replay_root).unwrap();
+        let replay = SqliteHarnessRepository::new(
+            replay_root.clone(),
+            replay_root.join("harness.db"),
+            repository.schema_dir.clone(),
+        );
+        replay.init().unwrap();
+        seed_resolver_completion_fixture(&replay, "US-COMPLETE", passing_command());
+        let replay_connection = replay.open_existing().unwrap();
+        replay_connection.execute("INSERT INTO backlog (uid, title, status, outcome_schedule_kind) VALUES ('blg_44444444444444444444444444444444', 'second resolver', 'accepted', 'manual');", []).unwrap();
+        replay_connection.execute("INSERT INTO story_backlog_link (story_id, backlog_uid, relationship, linked_at) VALUES ('US-COMPLETE', 'blg_44444444444444444444444444444444', 'resolves', '2026-01-02 00:00:00');", []).unwrap();
+        assert!(replay.apply_changeset(&changeset_path).unwrap().applied);
+        let replayed: (String, Option<i64>, String) = replay_connection.query_row("SELECT resolution_evidence, outcome_baseline_trace_count, closed_at FROM backlog WHERE uid='blg_33333333333333333333333333333333';", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        assert_eq!(replayed, (live.0, live.1, live.3));
+        let replayed_verified_at: String = replay_connection
+            .query_row(
+                "SELECT last_verified_at FROM story WHERE id='US-COMPLETE'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(replayed_verified_at, live_verified_at);
+    }
+
+    #[test]
+    fn story_completion_failure_and_transaction_error_close_nothing() {
+        let (_failure_dir, failure_repository) = isolated_test_repository();
+        failure_repository.init().unwrap();
+        let (failure_backlog_id, _, _) =
+            seed_resolver_completion_fixture(&failure_repository, "US-FAIL", failing_command());
+        let failed = failure_repository.complete_story("US-FAIL").unwrap();
+        assert_eq!(failed.result, "fail");
+        let failure_connection = failure_repository.open_existing().unwrap();
+        let failure_state: (String, String, String) = failure_connection.query_row("SELECT story.status, story.last_verified_result, backlog.status FROM story JOIN story_backlog_link AS link ON link.story_id=story.id JOIN backlog ON backlog.uid=link.backlog_uid WHERE story.id='US-FAIL' AND backlog.id=?1;", params![failure_backlog_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        assert_eq!(
+            failure_state,
+            (
+                "in_progress".to_owned(),
+                "fail".to_owned(),
+                "accepted".to_owned()
+            )
+        );
+
+        let (_rollback_dir, rollback_repository) = isolated_test_repository();
+        rollback_repository.init().unwrap();
+        let (rollback_backlog_id, _, _) = seed_resolver_completion_fixture(
+            &rollback_repository,
+            "US-ROLLBACK",
+            passing_command(),
+        );
+        let rollback_connection = rollback_repository.open_existing().unwrap();
+        rollback_connection.execute_batch("CREATE TRIGGER fail_completion_backlog BEFORE UPDATE OF status ON backlog WHEN NEW.status='implemented' BEGIN SELECT RAISE(FAIL, 'injected completion failure'); END;").unwrap();
+        assert!(rollback_repository.complete_story("US-ROLLBACK").is_err());
+        let rollback_state: (String, Option<String>, String) = rollback_connection.query_row("SELECT story.status, story.last_verified_result, backlog.status FROM story JOIN story_backlog_link AS link ON link.story_id=story.id JOIN backlog ON backlog.uid=link.backlog_uid WHERE story.id='US-ROLLBACK' AND backlog.id=?1;", params![rollback_backlog_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        assert_eq!(
+            rollback_state,
+            ("in_progress".to_owned(), None, "accepted".to_owned())
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn story_completion_concurrent_calls_commit_once() {
+        let (temp_dir, repository) = isolated_test_repository();
+        repository.init().unwrap();
+        add_completion_story(
+            &repository,
+            "US-CONCURRENT",
+            Some("touch completion-ready-$$; while [ \"$(find . -maxdepth 1 -name 'completion-ready-*' | wc -l | tr -d ' ')\" -lt 2 ]; do sleep 0.01; done"),
+        );
+
+        let root = repository.repo_root.clone();
+        let db = repository.db_path.clone();
+        let schema = repository.schema_dir.clone();
+        let first = std::thread::spawn({
+            let root = root.clone();
+            let db = db.clone();
+            let schema = schema.clone();
+            move || {
+                SqliteHarnessRepository::new(root, db, schema)
+                    .with_run_id("run_completion_concurrent")
+                    .complete_story("US-CONCURRENT")
+                    .unwrap()
+                    .result
+            }
+        });
+        let second = std::thread::spawn(move || {
+            SqliteHarnessRepository::new(root, db, schema)
+                .with_run_id("run_completion_concurrent")
+                .complete_story("US-CONCURRENT")
+                .unwrap()
+                .result
+        });
+        let mut results = vec![first.join().unwrap(), second.join().unwrap()];
+        results.sort();
+        assert_eq!(results, vec!["already-completed", "pass"]);
+        let changeset = fs::read_to_string(
+            temp_dir
+                .path()
+                .join("repo/.harness/changesets/run_completion_concurrent.changeset.jsonl"),
+        )
+        .unwrap();
+        assert_eq!(changeset.matches("\"op\":\"story.complete\"").count(), 1);
+    }
+
+    #[test]
+    fn story_completion_rejects_ineligible_resolver_target_before_verification() {
+        let (_temp_dir, repository) = isolated_test_repository();
+        repository.init().unwrap();
+        let (backlog_id, _, _) =
+            seed_resolver_completion_fixture(&repository, "US-TARGET", passing_command());
+        let connection = repository.open_existing().unwrap();
+        for (status, evidence) in [
+            ("proposed", None),
+            ("rejected", None),
+            (
+                "implemented",
+                Some("{\"story_id\":\"US-OTHER\",\"result\":\"pass\"}"),
+            ),
+        ] {
+            connection
+                .execute(
+                    "UPDATE backlog SET status=?1, resolution_evidence=?2 WHERE id=?3;",
+                    params![status, evidence, backlog_id],
+                )
+                .unwrap();
+            assert!(
+                matches!(repository.complete_story("US-TARGET"), Err(HarnessInfraError::StoryCompletion(message)) if message.contains(&format!("is '{status}'")))
+            );
+        }
+        let status: String = connection
+            .query_row(
+                "SELECT status FROM story WHERE id='US-TARGET';",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "in_progress");
+    }
+
+    #[test]
     fn story_verify_records_pass_fail_and_missing_command() {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo_root = temp_dir.path().join("repo");
@@ -3293,6 +6884,65 @@ mod tests {
             repository.verify_story("US-MISSING"),
             Err(HarnessInfraError::MissingStoryVerifyCommand(id)) if id == "US-MISSING"
         ));
+    }
+
+    #[test]
+    fn validation_subprocesses_do_not_inherit_run_operation_log_env() {
+        let (_temp_dir, mut repository) = isolated_test_repository();
+        repository.init().unwrap();
+
+        for (id, status) in [
+            ("US-VERIFY", None),
+            ("US-VERIFY-ALL", None),
+            ("US-COMPLETE-ENV", Some("in_progress")),
+        ] {
+            repository
+                .add_story(StoryAddInput {
+                    id: id.to_owned(),
+                    title: id.to_owned(),
+                    risk_lane: RiskLane::Normal,
+                    contract_doc: None,
+                    verify_command: Some(env_clean_verification_command().to_owned()),
+                    notes: None,
+                })
+                .unwrap();
+            if let Some(status) = status {
+                repository
+                    .update_story(StoryUpdateInput {
+                        id: id.to_owned(),
+                        status: Some(status.to_owned()),
+                        evidence: None,
+                        unit: None,
+                        integration: None,
+                        e2e: None,
+                        platform: None,
+                        verify_command: None,
+                    })
+                    .unwrap();
+            }
+        }
+
+        repository.run_id_override = Some("run_validation_env".to_owned());
+        repository.verification_env_override = vec![
+            ("HARNESS_RUN_ID".to_owned(), "run_validation_env".to_owned()),
+            ("HARNESS_RUN_MODE".to_owned(), "execute".to_owned()),
+            (
+                "HARNESS_DB_PATH".to_owned(),
+                repository.db_path.display().to_string(),
+            ),
+        ];
+
+        assert_eq!(repository.verify_story("US-VERIFY").unwrap().result, "pass");
+        assert_eq!(repository.verify_all_stories().unwrap().failed(), 0);
+        assert_eq!(
+            repository.complete_story("US-COMPLETE-ENV").unwrap().result,
+            "pass"
+        );
+
+        let changeset =
+            fs::read_to_string(repository.changeset_path("run_validation_env")).unwrap();
+        assert!(changeset.contains("\"op\":\"story.verify\""));
+        assert!(changeset.contains("\"op\":\"story.complete\""));
     }
 
     #[test]
@@ -3635,75 +7285,616 @@ mod tests {
         assert_eq!(audit.broken_tools.len(), 1);
         assert!(audit.entropy_score() > 0);
 
-        let proposals = repository.propose(true).unwrap();
+        let proposals = repository
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals;
         assert!(proposals.iter().any(|proposal| proposal
             .evidence
             .contains("Context rules missed schema decision")));
         assert!(proposals
             .iter()
-            .all(|proposal| proposal.committed_backlog_id.is_some()));
-        assert!(repository.query_backlog(BacklogFilter::Open).unwrap().len() >= 1);
+            .all(|proposal| proposal.committed_backlog_id.is_none()));
+        assert!(repository
+            .query_backlog(BacklogFilter::Open)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
-    fn propose_suppresses_resolved_validation_provider_friction() {
+    fn proposal_decision_accepts_one_key_idempotently_and_rejects_one_key() {
         let (_temp_dir, repository) = test_repository();
         repository.init().unwrap();
-
         for _ in 0..2 {
             repository
                 .record_trace(TraceInput {
-                    task_summary: "Validation provider friction trace".to_owned(),
+                    task_summary: "Proposal decision fixture".to_owned(),
                     intake_id: None,
                     story_id: None,
                     agent: Some("codex".to_owned()),
                     outcome: Some("completed".to_owned()),
                     duration_seconds: None,
                     token_estimate: None,
-                    friction: Some(
-                        "Tool registry lacks entries for local validation capabilities".to_owned(),
-                    ),
+                    friction: Some("Repeatable proposal decision fixture".to_owned()),
                     notes: None,
-                    actions: CsvList::from_optional(Some("query tools".to_owned())),
-                    files_read: CsvList::from_optional(Some("docs/TOOL_REGISTRY.md".to_owned())),
-                    files_changed: CsvList::from_optional(Some("harness.db".to_owned())),
+                    actions: CsvList::from_optional(None),
+                    files_read: CsvList::from_optional(None),
+                    files_changed: CsvList::from_optional(None),
                     decisions: CsvList::from_optional(None),
                     errors: CsvList::from_optional(None),
                 })
                 .unwrap();
         }
-
-        let executable = std::env::current_exe()
+        let proposal = repository
+            .propose(ProposalDecision::Preview)
             .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        for (name, capability) in [
-            ("build-provider", "build-verification"),
-            ("browser-provider", "browser-e2e"),
-            ("coverage-provider", "coverage"),
-            ("design-provider", "design-validation"),
-            ("platform-provider", "platform-smoke"),
-        ] {
+            .proposals
+            .into_iter()
+            .next()
+            .unwrap();
+        let accepted = repository
+            .propose(ProposalDecision::Accept {
+                key: proposal.key.clone(),
+                schedule: "traces:3".to_owned(),
+            })
+            .unwrap();
+        assert!(accepted.message.unwrap().contains("Accepted proposal"));
+        let unchanged = repository
+            .propose(ProposalDecision::Accept {
+                key: proposal.key.clone(),
+                schedule: "traces:3".to_owned(),
+            })
+            .unwrap();
+        assert!(unchanged.message.unwrap().contains("unchanged"));
+        assert!(repository
+            .propose(ProposalDecision::Reject {
+                key: proposal.key,
+                reason: "not now".to_owned(),
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn proposal_recurrence_classifies_suppression_and_regression() {
+        let (_temp_dir, repository) = test_repository();
+        repository.init().unwrap();
+        for _ in 0..2 {
+            record_proposal_friction(&repository, "Lifecycle regression fixture");
+        }
+        let proposal = repository
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.title.contains("Lifecycle regression fixture"))
+            .unwrap();
+        assert_eq!(proposal.lifecycle_state, "new");
+        assert_eq!(proposal.evidence_items.len(), 2);
+
+        repository
+            .propose(ProposalDecision::Accept {
+                key: proposal.key.clone(),
+                schedule: "manual".to_owned(),
+            })
+            .unwrap();
+        let connection = repository.open_existing().unwrap();
+        let predecessor: String = connection
+            .query_row(
+                "SELECT uid FROM backlog WHERE proposal_key=?1",
+                params![proposal.key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE backlog SET status='implemented', closed_at=datetime('now'), resolution_evidence='fresh proof' WHERE uid=?1",
+                params![predecessor],
+            )
+            .unwrap();
+
+        assert!(repository
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .iter()
+            .all(|item| item.key != proposal.key));
+        let suppressed = repository
+            .propose(ProposalDecision::PreviewSuppressed)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.key == proposal.key)
+            .unwrap();
+        assert_eq!(suppressed.lifecycle_state, "suppressed");
+        assert!(suppressed
+            .lifecycle_explanation
+            .unwrap()
+            .contains("no uncovered evidence"));
+
+        record_proposal_friction(&repository, "Lifecycle regression fixture");
+        let regression = repository
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.key == proposal.key)
+            .unwrap();
+        assert_eq!(regression.lifecycle_state, "regression");
+        assert_eq!(
+            regression.predecessor_uid.as_deref(),
+            Some(predecessor.as_str())
+        );
+        assert_eq!(regression.evidence_items.len(), 1);
+
+        repository
+            .propose(ProposalDecision::Accept {
+                key: proposal.key.clone(),
+                schedule: "traces:5".to_owned(),
+            })
+            .unwrap();
+        let recurrence: (String, String, Option<String>, Option<String>, Option<i64>) = connection
+            .query_row(
+                "SELECT uid, occurrence_kind, predecessor_uid, outcome_schedule_kind, outcome_after_traces FROM backlog WHERE proposal_key=?1 ORDER BY id DESC LIMIT 1",
+                params![proposal.key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_ne!(recurrence.0, predecessor);
+        assert_eq!(recurrence.1, "regression");
+        assert_eq!(recurrence.2.as_deref(), Some(predecessor.as_str()));
+        assert_eq!(recurrence.3.as_deref(), Some("trace_count"));
+        assert_eq!(recurrence.4, Some(5));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM proposal_evidence_link WHERE backlog_uid=?1",
+                    params![recurrence.0],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn proposal_recurrence_rejection_creates_reconsideration_idempotently() {
+        let (_temp_dir, repository) = test_repository();
+        repository.init().unwrap();
+        for _ in 0..2 {
+            record_proposal_friction(&repository, "Lifecycle reconsideration fixture");
+        }
+        let proposal = repository
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.title.contains("Lifecycle reconsideration fixture"))
+            .unwrap();
+        repository
+            .propose(ProposalDecision::Reject {
+                key: proposal.key.clone(),
+                reason: "not useful yet".to_owned(),
+            })
+            .unwrap();
+        record_proposal_friction(&repository, "Lifecycle reconsideration fixture");
+        let candidate = repository
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.key == proposal.key)
+            .unwrap();
+        assert_eq!(candidate.lifecycle_state, "reconsideration");
+        let rejected = repository
+            .propose(ProposalDecision::Reject {
+                key: proposal.key.clone(),
+                reason: "still not useful".to_owned(),
+            })
+            .unwrap();
+        assert!(rejected
+            .message
+            .unwrap()
+            .contains("Rejected reconsideration"));
+        let unchanged = repository
+            .propose(ProposalDecision::Reject {
+                key: proposal.key.clone(),
+                reason: "still not useful".to_owned(),
+            })
+            .unwrap();
+        assert!(unchanged.message.unwrap().contains("unchanged"));
+
+        let connection = repository.open_existing().unwrap();
+        let latest: (String, Option<String>, Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT occurrence_kind, predecessor_uid, outcome_schedule_kind, closed_at FROM backlog WHERE proposal_key=?1 ORDER BY id DESC LIMIT 1",
+                params![proposal.key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(latest.0, "reconsideration");
+        assert!(latest.1.is_some());
+        assert_eq!(latest.2, None);
+        assert!(latest.3.is_some());
+    }
+
+    #[test]
+    fn proposal_recurrence_classifies_pending_accepted_and_legacy_rows() {
+        let (_temp_dir, repository) = test_repository();
+        repository.init().unwrap();
+        for _ in 0..2 {
+            record_proposal_friction(&repository, "Lifecycle pending fixture");
+        }
+        let proposal = repository
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.title.contains("Lifecycle pending fixture"))
+            .unwrap();
+        let connection = repository.open_existing().unwrap();
+        connection
+            .execute(
+                "INSERT INTO backlog (uid, proposal_key, occurrence_kind, title, status) VALUES (?1, ?2, 'original', ?3, 'proposed')",
+                params![stable_uid("blg", "pending fixture"), proposal.key, proposal.title],
+            )
+            .unwrap();
+        let pending = repository
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.key == proposal.key)
+            .unwrap();
+        assert_eq!(pending.lifecycle_state, "pending");
+        assert!(pending.committed_backlog_id.is_some());
+        connection
+            .execute(
+                "UPDATE backlog SET status='accepted', accepted_at=datetime('now'), outcome_schedule_kind='manual' WHERE proposal_key=?1",
+                params![proposal.key],
+            )
+            .unwrap();
+        let accepted = repository
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.key == proposal.key)
+            .unwrap();
+        assert_eq!(accepted.lifecycle_state, "accepted");
+
+        for _ in 0..2 {
+            record_proposal_friction(&repository, "Lifecycle legacy fixture");
+        }
+        let legacy_proposal = repository
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.title.contains("Lifecycle legacy fixture"))
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO backlog (title, status) VALUES (?1, 'implemented')",
+                params![legacy_proposal.title],
+            )
+            .unwrap();
+        let legacy = repository
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.key == legacy_proposal.key)
+            .unwrap();
+        assert_eq!(legacy.lifecycle_state, "legacy-unclassified");
+        assert!(legacy
+            .lifecycle_explanation
+            .unwrap()
+            .contains("US-080 reconciliation"));
+    }
+
+    #[test]
+    fn proposal_recurrence_changeset_rebuild_preserves_lineage_and_evidence() {
+        let (_temp_dir, repository) = isolated_test_repository();
+        let repository = repository.with_run_id("run_proposal_recurrence_replay");
+        repository.init().unwrap();
+        for _ in 0..2 {
+            record_proposal_friction(&repository, "Lifecycle replay fixture");
+        }
+        let proposal = repository
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.title.contains("Lifecycle replay fixture"))
+            .unwrap();
+        repository
+            .propose(ProposalDecision::Accept {
+                key: proposal.key.clone(),
+                schedule: "manual".to_owned(),
+            })
+            .unwrap();
+        let mut connection = repository.open_existing().unwrap();
+        let predecessor: String = connection
+            .query_row(
+                "SELECT uid FROM backlog WHERE proposal_key=?1",
+                params![proposal.key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        repository
+            .with_logged_write(&mut connection, |transaction| {
+                transaction.execute(
+                    "UPDATE backlog SET status='implemented', closed_at=datetime('now'), resolution_evidence='replay proof' WHERE uid=?1",
+                    params![predecessor],
+                )?;
+                Ok((
+                    (),
+                    vec![json!({
+                        "op": "backlog.complete",
+                        "version": 1,
+                        "uid": predecessor,
+                        "payload": {
+                            "story_id": "US-REPLAY",
+                            "resolution_evidence": "replay proof",
+                            "trace_baseline": null,
+                        }
+                    })],
+                ))
+            })
+            .unwrap();
+        record_proposal_friction(&repository, "Lifecycle replay fixture");
+        repository
+            .propose(ProposalDecision::Accept {
+                key: proposal.key.clone(),
+                schedule: "traces:4".to_owned(),
+            })
+            .unwrap();
+
+        let changeset = repository
+            .repo_root
+            .join(".harness/changesets/run_proposal_recurrence_replay.changeset.jsonl");
+        let replay = SqliteHarnessRepository::new(
+            repository.repo_root.clone(),
+            repository.repo_root.join("replay.db"),
+            repository.schema_dir.clone(),
+        );
+        replay.init().unwrap();
+        replay.apply_changeset(&changeset).unwrap();
+        let replay_connection = replay.open_existing().unwrap();
+        let rows: i64 = replay_connection
+            .query_row(
+                "SELECT COUNT(*) FROM backlog WHERE proposal_key=?1",
+                params![proposal.key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 2);
+        let recurrence: (String, Option<String>, i64) = replay_connection
+            .query_row(
+                "SELECT backlog.occurrence_kind, backlog.predecessor_uid,
+                        (SELECT COUNT(*) FROM proposal_evidence_link WHERE backlog_uid=backlog.uid)
+                 FROM backlog WHERE proposal_key=?1 ORDER BY id DESC LIMIT 1",
+                params![proposal.key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(recurrence.0, "regression");
+        assert_eq!(recurrence.1.as_deref(), Some(predecessor.as_str()));
+        assert_eq!(recurrence.2, 1);
+    }
+
+    #[test]
+    fn improvement_health_outcomes_append_replay_and_open_work_is_refused() {
+        let (_temp_dir, repository) = isolated_test_repository();
+        repository.init().unwrap();
+        let repository = repository.with_run_id("run_improvement_health_outcome");
+        let connection = repository.open_existing().unwrap();
+        let implemented_uid = "blg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        connection.execute(
+            "INSERT INTO backlog (uid, proposal_key, occurrence_kind, title, status, predicted_impact, actual_outcome, outcome_schedule_kind)
+             VALUES (?1, 'improvement.proposal:v1:test', 'original', 'Measured improvement', 'implemented', 'less friction', 'legacy field unchanged', 'manual');",
+            params![implemented_uid],
+        ).unwrap();
+        let implemented_id = connection.last_insert_rowid();
+        connection.execute(
+            "INSERT INTO backlog (uid, proposal_key, occurrence_kind, title, status, outcome_schedule_kind)
+             VALUES ('blg_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'improvement.proposal:v1:open', 'original', 'Open improvement', 'accepted', 'manual');",
+            [],
+        ).unwrap();
+        let open_id = connection.last_insert_rowid();
+
+        let first = repository
+            .record_backlog_outcome(BacklogOutcomeInput {
+                id: implemented_id,
+                status: "confirmed".to_owned(),
+                outcome: "Friction decreased".to_owned(),
+                evidence: Some("five clean traces".to_owned()),
+            })
+            .unwrap();
+        let second = repository
+            .record_backlog_outcome(BacklogOutcomeInput {
+                id: implemented_id,
+                status: "ineffective".to_owned(),
+                outcome: "The initial gain was too small".to_owned(),
+                evidence: Some("benchmark comparison".to_owned()),
+            })
+            .unwrap();
+        let third = repository
+            .record_backlog_outcome(BacklogOutcomeInput {
+                id: implemented_id,
+                status: "reverted".to_owned(),
+                outcome: "The issue returned".to_owned(),
+                evidence: None,
+            })
+            .unwrap();
+        assert_eq!((first.ordinal, second.ordinal, third.ordinal), (1, 2, 3));
+        assert_eq!(
             repository
-                .register_tool(ToolRegisterInput {
-                    name: name.to_owned(),
-                    command: executable.clone(),
-                    description: format!("{capability} test provider for proposal suppression"),
-                    responsibility: "Verification".to_owned(),
-                    args: Vec::new(),
-                    force: false,
-                    kind: "cli".to_owned(),
-                    capability: Some(capability.to_owned()),
-                    scan_target: None,
+                .record_backlog_outcome(BacklogOutcomeInput {
+                    id: open_id,
+                    status: "confirmed".to_owned(),
+                    outcome: "too early".to_owned(),
+                    evidence: None,
                 })
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "backlog outcome record: backlog item '{open_id}' must be an implemented keyed occurrence"
+            )
+        );
+
+        let connection = repository.open_existing().unwrap();
+        let state: (i64, String, String) = connection
+            .query_row(
+            "SELECT COUNT(*), MAX(CASE WHEN ordinal=3 THEN backlog_outcome_observation.status END), backlog.actual_outcome
+             FROM backlog_outcome_observation
+             JOIN backlog ON backlog.uid=backlog_outcome_observation.backlog_uid
+             WHERE backlog_uid=?1;",
+                params![implemented_uid],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            state,
+            (
+                3,
+                "reverted".to_owned(),
+                "legacy field unchanged".to_owned()
+            )
+        );
+        assert!(repository
+            .audit()
+            .unwrap()
+            .backlog_without_outcomes
+            .is_empty());
+
+        let changeset = repository.changeset_path("run_improvement_health_outcome");
+        let replay = SqliteHarnessRepository::new(
+            repository.repo_root.clone(),
+            repository.repo_root.join("replay.db"),
+            repository.schema_dir.clone(),
+        );
+        replay.init().unwrap();
+        replay.open_existing().unwrap().execute(
+            "INSERT INTO backlog (uid, proposal_key, occurrence_kind, title, status, predicted_impact, actual_outcome, outcome_schedule_kind)
+             VALUES (?1, 'improvement.proposal:v1:test', 'original', 'Measured improvement', 'implemented', 'less friction', 'legacy field unchanged', 'manual');",
+            params![implemented_uid],
+        ).unwrap();
+        replay.apply_changeset(&changeset).unwrap();
+        let replay_count: i64 = replay
+            .open_existing()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM backlog_outcome_observation WHERE backlog_uid=?1;",
+                params![implemented_uid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(replay_count, 3);
+    }
+
+    #[test]
+    fn improvement_health_derives_schedule_states_and_is_read_only() {
+        let (_temp_dir, repository) = isolated_test_repository();
+        repository.init().unwrap();
+        let connection = repository.open_existing().unwrap();
+        for (uid, key, title, kind, due, after, baseline) in [
+            (
+                "blg_11111111111111111111111111111111",
+                "manual",
+                "Manual review",
+                "manual",
+                None,
+                None,
+                None,
+            ),
+            (
+                "blg_22222222222222222222222222222222",
+                "future",
+                "Future review",
+                "due_at",
+                Some("2999-01-01T00:00:00Z"),
+                None,
+                None,
+            ),
+            (
+                "blg_33333333333333333333333333333333",
+                "past",
+                "Due review",
+                "due_at",
+                Some("2000-01-01T00:00:00Z"),
+                None,
+                None,
+            ),
+            (
+                "blg_44444444444444444444444444444444",
+                "traces",
+                "Trace review",
+                "trace_count",
+                None,
+                Some(2),
+                Some(0),
+            ),
+            (
+                "blg_55555555555555555555555555555555",
+                "error",
+                "Broken baseline",
+                "trace_count",
+                None,
+                Some(2),
+                Some(9),
+            ),
+        ] {
+            connection.execute(
+                "INSERT INTO backlog (uid, proposal_key, occurrence_kind, title, status, predicted_impact, outcome_schedule_kind, outcome_due_at, outcome_after_traces, outcome_baseline_trace_count)
+                 VALUES (?1, ?2, 'original', ?3, 'implemented', 'health fixture', ?4, ?5, ?6, ?7);",
+                params![uid, format!("improvement.proposal:v1:{key}"), title, kind, due, after, baseline],
+            ).unwrap();
+        }
+        connection.execute(
+            "INSERT INTO backlog (uid, proposal_key, occurrence_kind, title, status, predicted_impact)
+             VALUES ('blg_66666666666666666666666666666666', 'improvement.proposal:v1:legacy-plan', 'original', 'Missing plan', 'implemented', 'health fixture');",
+            [],
+        ).unwrap();
+        for index in 1..=2 {
+            connection
+                .execute(
+                    "INSERT INTO trace (uid, task_summary) VALUES (?1, 'health trace');",
+                    params![format!("trc_{index:032x}")],
+                )
                 .unwrap();
         }
-        repository.check_tools(None).unwrap();
+        connection.execute(
+            "INSERT INTO backlog_outcome_observation (uid, backlog_uid, ordinal, status, outcome, observed_at)
+             VALUES ('obs_77777777777777777777777777777777', 'blg_11111111111111111111111111111111', 1, 'legacy_recorded', 'preserved old outcome', '2026-01-01 00:00:00');",
+            [],
+        ).unwrap();
+        drop(connection);
 
-        let proposals = repository.propose(false).unwrap();
-        assert!(proposals.iter().all(|proposal| !proposal
-            .title
-            .contains("Tool registry lacks entries for local validation capabilities")));
+        let before = fs::read(&repository.db_path).unwrap();
+        let health = repository.query_improvement_health().unwrap();
+        let health_again = repository.query_improvement_health().unwrap();
+        let after = fs::read(&repository.db_path).unwrap();
+        assert_eq!(health, health_again);
+        assert_eq!(before, after);
+        let states = health
+            .items
+            .iter()
+            .filter(|item| item.category == "outcome_review")
+            .map(|item| (item.title.as_str(), item.state.as_str()))
+            .collect::<Vec<_>>();
+        assert!(states.contains(&("Manual review", "legacy_recorded")));
+        assert!(states.contains(&("Future review", "scheduled_not_due")));
+        assert!(states.contains(&("Due review", "due")));
+        assert!(states.contains(&("Trace review", "due")));
+        assert!(states.contains(&("Broken baseline", "schedule_error")));
+        assert!(states.contains(&("Missing plan", "awaiting_observation_plan")));
+        let legacy = health
+            .items
+            .iter()
+            .find(|item| item.title == "Manual review")
+            .unwrap();
+        assert_eq!(legacy.outcome, "preserved old outcome");
     }
 
     #[test]
@@ -4119,5 +8310,424 @@ implemented
         assert_eq!(specific.achieved, TraceQualityTier::Minimal);
         assert_eq!(specific.required, None);
         assert!(specific.meets_requirement);
+    }
+
+    #[test]
+    fn review_finding_rfc3339_unicode_and_exact_rejection_reason() {
+        let negative = parse_observation_schedule("due:2099-01-01T12:00:00-05:00").unwrap();
+        assert_eq!(negative.0, "due_at");
+        assert_eq!(negative.1.as_deref(), Some("2099-01-01T17:00:00+00:00"));
+        assert!(parse_observation_schedule("due:2099-01-01 12:00:00").is_err());
+
+        let unicode = format!("{}🙂bbbb", "0".repeat(68));
+        assert!(short_title(&unicode).ends_with("..."));
+        assert_ne!(
+            normalize_token("データベースが遅い"),
+            normalize_token("認証が失敗")
+        );
+
+        let (_temp_dir, repository) = test_repository();
+        repository.init().unwrap();
+        for _ in 0..2 {
+            record_proposal_friction(&repository, "review rejection prefix fixture");
+        }
+        let proposal = repository
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.title.contains("review rejection prefix fixture"))
+            .unwrap();
+        repository
+            .propose(ProposalDecision::Reject {
+                key: proposal.key.clone(),
+                reason: "not useful yet".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(
+            repository
+                .open_existing()
+                .unwrap()
+                .query_row(
+                    "SELECT rejection_reason FROM backlog WHERE proposal_key=?1",
+                    params![proposal.key],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "not useful yet"
+        );
+        let different = repository.propose(ProposalDecision::Reject {
+            key: proposal.key,
+            reason: "not useful".to_owned(),
+        });
+        assert!(matches!(
+            different,
+            Err(HarnessInfraError::ProposalDecision(message))
+                if message.contains("different reason")
+        ));
+
+        for _ in 0..2 {
+            record_proposal_friction(&repository, "review negative offset acceptance");
+        }
+        let due_proposal = repository
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.title.contains("review negative offset acceptance"))
+            .unwrap();
+        let accepted = repository
+            .propose(ProposalDecision::Accept {
+                key: due_proposal.key,
+                schedule: "due:2099-01-01T12:00:00-05:00".to_owned(),
+            })
+            .unwrap();
+        assert!(accepted.message.unwrap().contains("Accepted proposal"));
+    }
+
+    #[test]
+    fn review_finding_audit_decisions_require_stable_evidence_and_replay_replacement() {
+        let (temp_dir, repository) = isolated_test_repository();
+        repository.init().unwrap();
+        repository
+            .add_story(StoryAddInput {
+                id: "US-AUDIT-REVIEW".to_owned(),
+                title: "Original audit title".to_owned(),
+                risk_lane: RiskLane::Normal,
+                contract_doc: None,
+                verify_command: Some(passing_command().to_owned()),
+                notes: None,
+            })
+            .unwrap();
+        repository
+            .open_existing()
+            .unwrap()
+            .execute(
+                "UPDATE story SET status='implemented' WHERE id='US-AUDIT-REVIEW'",
+                [],
+            )
+            .unwrap();
+
+        let proposal = repository
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.title.contains("unverified story"))
+            .unwrap();
+        let refused = repository.propose(ProposalDecision::Reject {
+            key: proposal.key,
+            reason: "reviewed".to_owned(),
+        });
+        assert!(matches!(
+            refused,
+            Err(HarnessInfraError::ProposalDecision(message))
+                if message.contains("audit --record-evidence")
+        ));
+
+        let logged = repository.with_run_id("run_review_audit_replacement");
+        logged.audit_record_evidence().unwrap();
+        let recorded = logged
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.title.contains("unverified story"))
+            .unwrap();
+        assert!(recorded
+            .evidence_items
+            .iter()
+            .all(|item| item.source_kind == "audit"));
+        logged
+            .propose(ProposalDecision::Reject {
+                key: recorded.key,
+                reason: "reviewed stable evidence".to_owned(),
+            })
+            .unwrap();
+        let connection = logged.open_existing().unwrap();
+        connection
+            .execute(
+                "UPDATE story SET title='Changed audit title' WHERE id='US-AUDIT-REVIEW'",
+                [],
+            )
+            .unwrap();
+        logged.audit_record_evidence().unwrap();
+        let changeset = logged.changeset_path("run_review_audit_replacement");
+        let contents = fs::read_to_string(&changeset).unwrap();
+        assert!(contents.contains("audit.evidence.clear"));
+        let live_total: i64 = connection
+            .query_row("SELECT COUNT(*) FROM audit_evidence_episode", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let live_active: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM audit_evidence_episode WHERE cleared_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let replay_root = temp_dir.path().join("audit-replay");
+        fs::create_dir_all(&replay_root).unwrap();
+        let replay = SqliteHarnessRepository::new(
+            replay_root.clone(),
+            replay_root.join("harness.db"),
+            logged.schema_dir.clone(),
+        );
+        replay.init().unwrap();
+        assert!(replay.apply_changeset(&changeset).unwrap().applied);
+        let replay_connection = replay.open_existing().unwrap();
+        assert_eq!(
+            replay_connection
+                .query_row("SELECT COUNT(*) FROM audit_evidence_episode", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            live_total
+        );
+        assert_eq!(
+            replay_connection
+                .query_row(
+                    "SELECT COUNT(*) FROM audit_evidence_episode WHERE cleared_at IS NULL",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            live_active
+        );
+    }
+
+    #[test]
+    fn review_finding_resolver_link_order_is_precise_and_replayable() {
+        let (temp_dir, repository) = isolated_test_repository();
+        repository.init().unwrap();
+        add_completion_story(&repository, "US-LINK-ORDER", Some(passing_command()));
+        let connection = repository.open_existing().unwrap();
+        connection.execute("INSERT INTO intake (uid, input_type, summary, risk_lane, story_id) VALUES ('ink_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'harness_improvement', 'review', 'high_risk', 'US-LINK-ORDER')", []).unwrap();
+        connection.execute("INSERT INTO backlog (uid, title, status) VALUES ('blg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'review resolver', 'accepted')", []).unwrap();
+        let backlog_id = connection.last_insert_rowid();
+        connection.execute("INSERT INTO trace (uid, recorded_at_unix_ns, created_at, intake_uid, task_summary, story_id, actions_taken, files_changed, outcome) VALUES ('trc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 100, '2026-01-01 00:00:00', 'ink_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'before link', 'US-LINK-ORDER', '[\"work\"]', '[\"src.rs\"]', 'completed')", []).unwrap();
+        connection.execute("INSERT INTO story_backlog_link (story_id, backlog_uid, relationship, linked_at, linked_at_unix_ns) VALUES ('US-LINK-ORDER', 'blg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'resolves', '2026-01-01 00:00:00', 200)", []).unwrap();
+        assert!(matches!(
+            repository.complete_story("US-LINK-ORDER"),
+            Err(HarnessInfraError::StoryCompletion(message))
+                if message.contains("after the newest resolver link")
+        ));
+
+        let logged = repository.with_run_id("run_review_link_replay");
+        connection
+            .execute(
+                "DELETE FROM story_backlog_link WHERE story_id='US-LINK-ORDER'",
+                [],
+            )
+            .unwrap();
+        logged
+            .link_story_backlog(StoryBacklogLinkInput {
+                story_id: "US-LINK-ORDER".to_owned(),
+                backlog_id,
+                relationship: "resolves".to_owned(),
+            })
+            .unwrap();
+        let live: (String, i64) = connection
+            .query_row("SELECT linked_at, linked_at_unix_ns FROM story_backlog_link WHERE story_id='US-LINK-ORDER'", [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+
+        let replay_root = temp_dir.path().join("link-replay");
+        fs::create_dir_all(&replay_root).unwrap();
+        let replay = SqliteHarnessRepository::new(
+            replay_root.clone(),
+            replay_root.join("harness.db"),
+            logged.schema_dir.clone(),
+        );
+        replay.init().unwrap();
+        add_completion_story(&replay, "US-LINK-ORDER", Some(passing_command()));
+        let replay_connection = replay.open_existing().unwrap();
+        replay_connection.execute("INSERT INTO backlog (uid, title, status) VALUES ('blg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'review resolver', 'accepted')", []).unwrap();
+        replay
+            .apply_changeset(&logged.changeset_path("run_review_link_replay"))
+            .unwrap();
+        let rebuilt: (String, i64) = replay_connection
+            .query_row("SELECT linked_at, linked_at_unix_ns FROM story_backlog_link WHERE story_id='US-LINK-ORDER'", [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        assert_eq!(rebuilt, live);
+    }
+
+    #[test]
+    fn proof_audit_mixed_resolver_semantic_history_matches_after_replay() {
+        let (temp_dir, live) = isolated_test_repository();
+        live.init().unwrap();
+        let replay_root = temp_dir.path().join("mixed-replay");
+        fs::create_dir_all(&replay_root).unwrap();
+        let replay = SqliteHarnessRepository::new(
+            replay_root.clone(),
+            replay_root.join("harness.db"),
+            live.schema_dir.clone(),
+        );
+        replay.init().unwrap();
+
+        for repository in [&live, &replay] {
+            add_completion_story(repository, "US-MIXED-ORDER", Some(passing_command()));
+            let connection = repository.open_existing().unwrap();
+            connection.execute("INSERT INTO intake (uid, input_type, summary, risk_lane, story_id) VALUES ('ink_99999999999999999999999999999999', 'harness_improvement', 'mixed order', 'high_risk', 'US-MIXED-ORDER')", []).unwrap();
+            connection.execute("INSERT INTO backlog (uid, title, status) VALUES ('blg_88888888888888888888888888888888', 'legacy resolver', 'accepted'), ('blg_99999999999999999999999999999999', 'precise resolver', 'accepted')", []).unwrap();
+        }
+
+        let before_changeset = temp_dir.path().join("mixed-before.changeset.jsonl");
+        fs::write(&before_changeset, r#"{"op":"changeset.header","version":1,"run_id":"run_mixed_before","base_schema_version":12}
+{"op":"story.backlog.link","version":1,"id":"US-MIXED-ORDER","payload":{"backlog_uid":"blg_88888888888888888888888888888888","relationship":"resolves","linked_at":"2025-12-31 23:59:59"}}
+{"op":"story.backlog.link","version":2,"id":"US-MIXED-ORDER","payload":{"backlog_uid":"blg_99999999999999999999999999999999","relationship":"resolves","linked_at":"2026-01-01 00:00:00","linked_at_unix_ns":200}}
+{"op":"trace.add","version":2,"uid":"trc_88888888888888888888888888888888","payload":{"recorded_at_unix_ns":150,"created_at":"2026-01-01 00:00:00","intake_uid":"ink_99999999999999999999999999999999","task_summary":"before newest link","story_id":"US-MIXED-ORDER","actions_taken":"[\"work\"]","files_changed":"[\"src.rs\"]","outcome":"completed"}}
+"#).unwrap();
+        let after_changeset = temp_dir.path().join("mixed-after.changeset.jsonl");
+        fs::write(&after_changeset, r#"{"op":"changeset.header","version":1,"run_id":"run_mixed_after","base_schema_version":12}
+{"op":"trace.add","version":2,"uid":"trc_99999999999999999999999999999999","payload":{"recorded_at_unix_ns":300,"created_at":"2026-01-01 00:00:00","intake_uid":"ink_99999999999999999999999999999999","task_summary":"after newest link","story_id":"US-MIXED-ORDER","actions_taken":"[\"work\"]","files_changed":"[\"src.rs\"]","outcome":"completed"}}
+"#).unwrap();
+
+        for repository in [&live, &replay] {
+            repository.apply_changeset(&before_changeset).unwrap();
+            let before_result = repository.complete_story("US-MIXED-ORDER");
+            assert!(
+                matches!(
+                    &before_result,
+                    Err(HarnessInfraError::StoryCompletion(message))
+                        if message.contains("after the newest resolver link")
+                ),
+                "unexpected pre-link completion result: {before_result:?}"
+            );
+            repository.apply_changeset(&after_changeset).unwrap();
+        }
+
+        let live_result = live.complete_story("US-MIXED-ORDER").unwrap();
+        let replay_result = replay.complete_story("US-MIXED-ORDER").unwrap();
+        assert_eq!(live_result.result, replay_result.result);
+        assert_eq!(
+            live_result.closed_backlog_ids,
+            replay_result.closed_backlog_ids
+        );
+        assert_eq!(
+            live_result.implementation_trace_uid,
+            replay_result.implementation_trace_uid
+        );
+        assert_eq!(
+            live_result.implementation_trace_uid.as_deref(),
+            Some("trc_99999999999999999999999999999999")
+        );
+    }
+
+    #[test]
+    fn review_finding_live_rebuild_recurrence_parity() {
+        let (temp_dir, repository) = isolated_test_repository();
+        repository.init().unwrap();
+        let logged = repository.with_run_id("run_review_recurrence_parity");
+        for _ in 0..2 {
+            record_proposal_friction(&logged, "review recurrence parity fixture");
+        }
+        let proposal = logged
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.title.contains("review recurrence parity fixture"))
+            .unwrap();
+        logged
+            .propose(ProposalDecision::Accept {
+                key: proposal.key.clone(),
+                schedule: "manual".to_owned(),
+            })
+            .unwrap();
+        add_completion_story(&logged, "US-REVIEW-RECURRENCE", Some(passing_command()));
+        let intake_id = logged
+            .record_intake(IntakeInput {
+                input_type: InputType::HarnessImprovement,
+                summary: "review recurrence resolver".to_owned(),
+                risk_lane: RiskLane::HighRisk,
+                risk_flags: CsvList::from_optional(None),
+                affected_docs: CsvList::from_optional(None),
+                story_id: Some("US-REVIEW-RECURRENCE".to_owned()),
+                notes: None,
+            })
+            .unwrap();
+        let connection = logged.open_existing().unwrap();
+        let backlog_id: i64 = connection
+            .query_row(
+                "SELECT id FROM backlog WHERE proposal_key=?1",
+                params![proposal.key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        logged
+            .link_story_backlog(StoryBacklogLinkInput {
+                story_id: "US-REVIEW-RECURRENCE".to_owned(),
+                backlog_id,
+                relationship: "resolves".to_owned(),
+            })
+            .unwrap();
+        logged
+            .record_trace(TraceInput {
+                task_summary: "review recurrence implementation".to_owned(),
+                intake_id: Some(intake_id),
+                story_id: Some("US-REVIEW-RECURRENCE".to_owned()),
+                agent: Some("codex".to_owned()),
+                outcome: Some("completed".to_owned()),
+                duration_seconds: None,
+                token_estimate: None,
+                friction: None,
+                notes: None,
+                actions: CsvList::from_optional(Some("implemented".to_owned())),
+                files_read: CsvList::from_optional(None),
+                files_changed: CsvList::from_optional(Some("src.rs".to_owned())),
+                decisions: CsvList::from_optional(None),
+                errors: CsvList::from_optional(None),
+            })
+            .unwrap();
+        logged.complete_story("US-REVIEW-RECURRENCE").unwrap();
+        record_proposal_friction(&logged, "review recurrence parity fixture");
+
+        let live = logged
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.key == proposal.key)
+            .unwrap();
+        assert_eq!(live.lifecycle_state, "regression");
+
+        let replay_root = temp_dir.path().join("recurrence-replay");
+        fs::create_dir_all(&replay_root).unwrap();
+        let replay = SqliteHarnessRepository::new(
+            replay_root.clone(),
+            replay_root.join("harness.db"),
+            logged.schema_dir.clone(),
+        );
+        replay.init().unwrap();
+        replay
+            .apply_changeset(&logged.changeset_path("run_review_recurrence_parity"))
+            .unwrap();
+        let rebuilt = replay
+            .propose(ProposalDecision::Preview)
+            .unwrap()
+            .proposals
+            .into_iter()
+            .find(|item| item.key == proposal.key)
+            .unwrap();
+        assert_eq!(rebuilt.lifecycle_state, "regression");
+        assert_eq!(rebuilt.evidence_items, live.evidence_items);
+        let live_order: (String, i64) = connection
+            .query_row(
+                "SELECT uid, recorded_at_unix_ns FROM trace WHERE task_summary='review recurrence implementation'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let rebuilt_order: (String, i64) = replay
+            .open_existing()
+            .unwrap()
+            .query_row(
+                "SELECT uid, recorded_at_unix_ns FROM trace WHERE task_summary='review recurrence implementation'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rebuilt_order, live_order);
     }
 }

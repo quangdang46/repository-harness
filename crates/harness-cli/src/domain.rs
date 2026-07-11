@@ -1,6 +1,9 @@
 use std::fmt;
 use std::str::FromStr;
 
+use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization;
+
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -13,6 +16,8 @@ pub enum ParseHarnessValueError {
     Integer(String),
     #[error("{0} must be 0 or 1. Example: --unit 1 --integration 1 --e2e 0 --platform 0")]
     BoolFlag(String),
+    #[error("{0}")]
+    CsvList(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,6 +93,54 @@ impl FromStr for RiskLane {
 
 pub const RISK_LANE_HELP: &str =
     "Accepted lanes: tiny, normal, high-risk. Use tiny instead of low.";
+
+/// Stable, versioned identity for an improvement issue. The canonical input is
+/// deliberately separate from display text so sorting, confidence, and title
+/// presentation cannot change machine identity.
+pub fn proposal_key(rule_id: &str, rule_version: u32, canonical_issue: &str) -> String {
+    let canonical = canonical_issue
+        .trim()
+        .nfc()
+        .collect::<String>()
+        .to_lowercase();
+    let mut digest = Sha256::new();
+    digest.update(rule_id.as_bytes());
+    digest.update([0]);
+    digest.update(rule_version.to_string().as_bytes());
+    digest.update([0]);
+    digest.update(canonical.as_bytes());
+    let hex = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{rule_id}:v{rule_version}:{hex}")
+}
+
+/// Generate an opaque 128-bit uid from source-owned identity material.
+pub fn stable_uid(prefix: &str, material: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(prefix.as_bytes());
+    digest.update([0]);
+    digest.update(material.as_bytes());
+    let hex = digest
+        .finalize()
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{prefix}_{hex}")
+}
+
+pub fn sha256_hex(material: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(material.as_bytes());
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 pub const RESPONSIBILITIES: &[&str] = &[
     "Task specification",
@@ -307,6 +360,15 @@ pub fn compiled_tool_registry() -> Vec<ToolEntry> {
         ),
         tool(
             "harness-cli",
+            "story complete",
+            "story complete",
+            "Run fresh proof and atomically complete a story and its resolved backlog work.",
+            &[("id", "string", true)],
+            "Task state",
+            "0.1.11",
+        ),
+        tool(
+            "harness-cli",
             "story verify-all",
             "story verify-all",
             "Run every configured story verification command.",
@@ -349,6 +411,33 @@ pub fn compiled_tool_registry() -> Vec<ToolEntry> {
             &[("id", "integer", true)],
             "Entropy auditing",
             "0.1.0",
+        ),
+        tool(
+            "harness-cli",
+            "backlog reconcile",
+            "backlog reconcile",
+            "Preview or apply conservative legacy lifecycle identity backfill.",
+            &[
+                ("action", "enum", true),
+                ("dry-run", "flag", false),
+                ("apply", "flag", false),
+            ],
+            "Entropy auditing",
+            "0.1.11",
+        ),
+        tool(
+            "harness-cli",
+            "backlog outcome record",
+            "backlog outcome record",
+            "Append measured impact for an implemented improvement occurrence.",
+            &[
+                ("id", "integer", true),
+                ("status", "enum", true),
+                ("outcome", "string", true),
+                ("evidence", "string", false),
+            ],
+            "Entropy auditing",
+            "0.1.11",
         ),
         tool(
             "harness-cli",
@@ -412,6 +501,15 @@ pub fn compiled_tool_registry() -> Vec<ToolEntry> {
             &[],
             "Entropy auditing",
             "0.1.0",
+        ),
+        tool(
+            "harness-cli",
+            "query improvement-health",
+            "query improvement-health",
+            "Show deterministic daily improvement lifecycle and next actions.",
+            &[],
+            "Entropy auditing",
+            "0.1.11",
         ),
         tool(
             "harness-cli",
@@ -1069,8 +1167,18 @@ impl AuditResult {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProposalEvidence {
+    pub source_kind: String,
+    pub uid: String,
+    pub fingerprint: String,
+    pub observed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImprovementProposal {
+    pub key: String,
+    pub lifecycle_state: String,
     pub title: String,
     pub component: String,
     pub evidence: String,
@@ -1080,6 +1188,9 @@ pub struct ImprovementProposal {
     pub validation_plan: String,
     pub confidence: String,
     pub committed_backlog_id: Option<i64>,
+    pub evidence_items: Vec<ProposalEvidence>,
+    pub predecessor_uid: Option<String>,
+    pub lifecycle_explanation: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1095,12 +1206,48 @@ pub struct HarnessStats {
 pub struct CsvList(pub Option<String>);
 
 impl CsvList {
+    #[cfg(test)]
     pub fn from_optional(value: Option<String>) -> Self {
         Self(value.filter(|item| !item.is_empty()))
     }
 
+    pub fn try_from_optional(value: Option<String>) -> Result<Self, ParseHarnessValueError> {
+        let Some(value) = value else {
+            return Ok(Self(None));
+        };
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Ok(Self(None));
+        }
+        if trimmed.starts_with('[') || trimmed.starts_with('{') {
+            let parsed: serde_json::Value = serde_json::from_str(trimmed).map_err(|error| {
+                ParseHarnessValueError::CsvList(format!(
+                    "JSON-like list input must be a JSON array of strings: {error}"
+                ))
+            })?;
+            let items = parsed.as_array().ok_or_else(|| {
+                ParseHarnessValueError::CsvList(
+                    "JSON-like list input must be an array, not an object".to_owned(),
+                )
+            })?;
+            if !items.iter().all(serde_json::Value::is_string) {
+                return Err(ParseHarnessValueError::CsvList(
+                    "JSON-like list input must contain only strings".to_owned(),
+                ));
+            }
+            return Ok(Self(Some(
+                serde_json::to_string(items).expect("serializing a JSON array cannot fail"),
+            )));
+        }
+        Ok(Self(Some(value)))
+    }
+
     pub fn as_json_text(&self) -> Option<String> {
         self.0.as_ref().map(|value| {
+            if let Ok(items) = serde_json::from_str::<Vec<String>>(value) {
+                return serde_json::to_string(&items)
+                    .expect("serializing a string list cannot fail");
+            }
             let escaped_items = value
                 .split(',')
                 .map(|item| format!("\"{}\"", escape_json_string(item.trim())))
@@ -1161,7 +1308,7 @@ pub fn normalize_token(value: &str) -> String {
     let mut last_was_separator = false;
 
     for character in value.trim().chars().flat_map(char::to_lowercase) {
-        if character.is_ascii_alphanumeric() {
+        if character.is_alphanumeric() {
             normalized.push(character);
             last_was_separator = false;
         } else if !last_was_separator && !normalized.is_empty() {
@@ -1229,9 +1376,84 @@ mod tests {
     }
 
     #[test]
+    fn proof_audit_json_list_input_is_normalized_instead_of_split_into_fragments() {
+        let list = CsvList::from_optional(Some(r#"["ran tests","checked replay"]"#.to_owned()));
+        assert_eq!(
+            list.as_json_text().as_deref(),
+            Some(r#"["ran tests","checked replay"]"#)
+        );
+        let empty = CsvList::from_optional(Some("[]".to_owned()));
+        assert_eq!(empty.as_json_text().as_deref(), Some("[]"));
+    }
+
+    #[test]
+    fn semantic_integrity_json_like_lists_are_typed_and_csv_remains_supported() {
+        assert_eq!(
+            CsvList::try_from_optional(Some("one, two".to_owned()))
+                .unwrap()
+                .as_json_text()
+                .as_deref(),
+            Some(r#"["one","two"]"#)
+        );
+        assert_eq!(
+            CsvList::try_from_optional(Some(r#"["one","two"]"#.to_owned()))
+                .unwrap()
+                .as_json_text()
+                .as_deref(),
+            Some(r#"["one","two"]"#)
+        );
+        assert_eq!(
+            CsvList::try_from_optional(Some("[]".to_owned()))
+                .unwrap()
+                .as_json_text()
+                .as_deref(),
+            Some("[]")
+        );
+        for invalid in [r#"["one",1]"#, r#"{"one":1}"#, r#"["one""#] {
+            assert!(CsvList::try_from_optional(Some(invalid.to_owned())).is_err());
+        }
+    }
+
+    #[test]
     fn parses_bool_flags() {
         assert_eq!(BoolFlag::parse("--unit", "1").unwrap(), BoolFlag(1));
         assert!(BoolFlag::parse("--unit", "yes").is_err());
+    }
+
+    #[test]
+    fn proposal_keys_are_versioned_unicode_safe_and_display_independent() {
+        let composed = proposal_key("audit.example", 1, "Café");
+        let decomposed = proposal_key("audit.example", 1, "Cafe\u{301}");
+        assert_eq!(composed, decomposed);
+        assert_ne!(composed, proposal_key("audit.example", 2, "Café"));
+        assert_ne!(composed, proposal_key("audit.other", 1, "Café"));
+    }
+
+    #[test]
+    fn stable_uids_are_prefixed_lowercase_hex() {
+        let uid = stable_uid("blg", "source identity");
+        assert!(uid.starts_with("blg_"));
+        assert_eq!(uid.len(), 36);
+        assert!(uid[4..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn compiled_registry_includes_legacy_reconciliation() {
+        let tool = compiled_tool_registry()
+            .into_iter()
+            .find(|tool| tool.name == "backlog reconcile")
+            .expect("backlog reconcile must be discoverable through query tools");
+        assert_eq!(tool.command, "backlog reconcile");
+        assert_eq!(tool.responsibility, "Entropy auditing");
+        assert_eq!(
+            tool.args
+                .iter()
+                .map(|argument| argument.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["action", "dry-run", "apply"]
+        );
     }
 
     fn trace_source() -> TraceScoreSource {
@@ -1324,5 +1546,18 @@ mod tests {
         assert!(result.must.iter().any(|item| item.target
             == "docs/decisions/0005-prebuilt-rust-harness-cli.md"
             && item.met));
+    }
+
+    #[test]
+    fn improvement_identity_is_versioned_and_unicode_safe() {
+        let first = proposal_key("audit.orphaned-story", 1, "Café Story");
+        assert_eq!(
+            first,
+            proposal_key("audit.orphaned-story", 1, " café story ")
+        );
+        assert_ne!(first, proposal_key("audit.orphaned-story", 2, "café story"));
+        assert!(first.starts_with("audit.orphaned-story:v1:"));
+        assert_eq!(stable_uid("ink", "same"), stable_uid("ink", "same"));
+        assert_ne!(stable_uid("ink", "same"), stable_uid("trc", "same"));
     }
 }

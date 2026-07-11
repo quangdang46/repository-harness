@@ -1,6 +1,6 @@
 ---
 name: harness-intake-griller
-description: Use when a user has a rough product idea, feature request, bug-fix intent, Harness improvement, or Symphony-ready work candidate and wants to clarify intent before implementation. This skill grills intent one decision at a time until shared understanding is explicit, then runs this repository's Harness feature-intake workflow, creates or updates product docs and story packets, and prepares runnable work for Symphony without starting execution unless explicitly requested.
+description: ONLY TRIGGER THIS TOOL IF CALLED EXPLICITLY BY NAME. Use when a user has a rough product idea, feature request, bug-fix intent, Harness improvement, or Symphony-ready work candidate and wants to clarify intent before implementation. This skill grills intent one decision at a time until shared understanding is explicit, then runs this repository's Harness feature-intake workflow, creates or updates product docs and story packets, and prepares runnable work for Symphony without starting execution unless explicitly requested.
 ---
 
 # Harness Intake Griller
