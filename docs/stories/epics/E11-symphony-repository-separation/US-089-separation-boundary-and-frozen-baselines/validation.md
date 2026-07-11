@@ -35,8 +35,8 @@ git rev-parse develop main HEAD
 git bundle verify <bundle>
 shasum -a 256 -c <bundle>.sha256
 sqlite3 harness.db "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
-scripts/verify-e11-inventory.sh --require-zero-unknown --require-fk-closure
-scripts/verify-e11-worktree-backups.sh <worktree-evidence-directory>
+E11_US089_ARTIFACT_DIR=<external-vault> scripts/verify-e11-us089.sh
+E11_US089_ARTIFACT_DIR=<external-vault> scripts/test-verify-e11-us089.sh
 git worktree list --porcelain
 cargo test --workspace
 npm --prefix crates/harness-symphony/web-ui run build
@@ -45,10 +45,28 @@ npm --prefix crates/harness-symphony/web-ui run desktop:smoke
 cargo fmt --check
 cargo clippy --workspace -- -D warnings
 scripts/validate-changeset-rebuild.sh
+scripts/test-validate-changeset-rebuild.sh
 git diff --check
 ```
 
 ## Acceptance Evidence
 
-Pending implementation. Evidence must link to each artifact named in
-`design.md` and include the frozen commit in every generated report.
+Implemented under `evidence/`; raw artifacts use external logical vault
+`US-089-20260711-v8`.
+
+- 392 frozen tracked paths and 38 planning-transition paths; zero unknown.
+- 16 user tables and 660 live rows have exact reviewed identity/payload
+  ownership. SQLite FK, disposition closure, and soft-reference checks pass;
+  three missing historical snapshots are explicit archived US-097 exceptions.
+- 32 changesets contain 32 unique headers and 322 reviewed non-header
+  operations. Checksums and live/applied-ledger discrepancies are recorded.
+- All 16 registered worktrees have passing restoration evidence, including the
+  real 380-addition/3-deletion Symphony diff.
+- WAL-only committed data survives the online backup while a bare main-file
+  copy misses it. Every discovered ignored SQLite candidate is retained.
+- All eight unreachable commits have checksummed external binary patches.
+- A fresh bundle clone at the frozen SHA passed 73 Harness CLI and 99 Symphony
+  Rust tests, Web build, 19 Playwright tests, desktop smoke, fmt, clippy,
+  changeset rebuild, and validator contract tests.
+- Negative fixtures prove tampered checksums, missing operations, unknown rows,
+  stale baseline SHA, and forged raw-log hashes fail closed.
