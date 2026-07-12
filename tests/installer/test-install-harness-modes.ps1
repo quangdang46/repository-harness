@@ -19,7 +19,9 @@ $env:HARNESS_CLI_BASE_URL = ([uri](Resolve-Path $Assets).Path).AbsoluteUri.TrimE
 $env:HARNESS_CLI_PLATFORM = "windows-x64"
 
 function Invoke-Install([string]$Directory, [string[]]$Mode = @()) {
-    & $Installer -Directory $Directory -Yes @Mode | Out-Null
+    $Arguments = @{ Directory = $Directory; Yes = $true }
+    foreach ($Name in $Mode) { $Arguments[$Name] = $true }
+    & $Installer @Arguments | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "installer failed for $Directory $Mode" }
 }
 
@@ -36,7 +38,7 @@ try {
     "project agents" | Set-Content (Join-Path $Merge "AGENTS.md")
     "project harness" | Set-Content (Join-Path $Merge "docs/HARNESS.md")
     "keep" | Set-Content (Join-Path $Merge "scripts/custom/keep.txt")
-    Invoke-Install $Merge @("-Merge")
+    Invoke-Install $Merge @("Merge")
     if ((Get-Content -Raw (Join-Path $Merge "AGENTS.md")).Trim() -ne "project agents") { throw "merge replaced AGENTS" }
     if ((Get-Content -Raw (Join-Path $Merge "docs/HARNESS.md")).Trim() -ne "project harness") { throw "merge replaced docs" }
     if (!(Test-Path (Join-Path $Merge "docs/ARCHITECTURE.md"))) { throw "merge did not fill missing payload" }
@@ -46,7 +48,7 @@ try {
     "old agents" | Set-Content (Join-Path $Override "AGENTS.md")
     "old docs" | Set-Content (Join-Path $Override "docs/private.md")
     "old scripts" | Set-Content (Join-Path $Override "scripts/private.ps1")
-    Invoke-Install $Override @("-Override")
+    Invoke-Install $Override @("Override")
     $Backup = Get-ChildItem (Join-Path $Override ".harness-backup") -Directory | Select-Object -First 1
     if (!(Test-Path (Join-Path $Backup.FullName "docs/private.md"))) { throw "override docs backup missing" }
     if (Test-Path (Join-Path $Override "docs/private.md")) { throw "override leaked old docs" }
@@ -54,7 +56,7 @@ try {
     $Shim = Join-Path $Temp "shim"
     New-Item -ItemType Directory -Force (Join-Path $Shim "docs"), (Join-Path $Shim "scripts") | Out-Null
     "local rule`n`n<!-- HARNESS:BEGIN -->`nstale`n<!-- HARNESS:END -->" | Set-Content (Join-Path $Shim "AGENTS.md")
-    Invoke-Install $Shim @("-Merge", "-RefreshAgentShim")
+    Invoke-Install $Shim @("Merge", "RefreshAgentShim")
     $ShimText = Get-Content -Raw (Join-Path $Shim "AGENTS.md")
     if (!$ShimText.Contains("local rule") -or !$ShimText.Contains("docs/FEATURE_INTAKE.md") -or $ShimText.Contains("stale")) { throw "shim refresh failed" }
 
