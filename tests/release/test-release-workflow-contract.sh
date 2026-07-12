@@ -11,6 +11,7 @@ done
 grep -Fq 'cargo test -p harness-cli --locked' "$workflow"
 grep -Fq 'cargo clippy -p harness-cli --all-targets --locked -- -D warnings' "$workflow"
 grep -Fq 'shasum -a 256 -c "${{ matrix.binary }}.sha256"' "$workflow"
+grep -Fq 'sha256sum -c "${{ matrix.binary }}.sha256"' "$workflow"
 grep -Fq 'tests/protocol/smoke-native-artifact.sh' "$workflow"
 grep -Fq 'tests/protocol/smoke-native-artifact.ps1' "$workflow"
 grep -Fq 'tests/installer/test-install-harness-modes.sh' "$workflow"
