@@ -1,15 +1,15 @@
 # repository-harness
 
 <div align="center">
-  <img src="repository_harness_illustration.webp" alt="repository-harness — turn any repo into an agent-ready workspace" width="720">
+  <img src="repository_harness_illustration.webp" alt="repository-harness — turn any repo into an agent-ready workspace">
 </div>
 
 <div align="center">
 
 ![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue.svg)
 ![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![GitHub release](https://img.shields.io/github/v/release/quangdang46/repository-harness?include_prereleases)](https://github.com/quangdang46/repository-harness/releases)
+![License](https://img.shields.io/badge/License-MIT-yellow.svg)
+![Release](https://img.shields.io/github/v/release/quangdang46/repository-harness?include_prereleases)
 
 </div>
 
@@ -17,7 +17,6 @@
 Coding agents do not only need better prompts — they need better repositories. Harness installs the missing project context: where to start, product contract, risk lane, proof requirements, and decisions future agents should inherit.
 
 <div align="center">
-<h3>Quick Install</h3>
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/install.sh?$(date +%s)" \
@@ -25,6 +24,28 @@ curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/mai
 ```
 
 </div>
+
+---
+
+## 🤖 Agent Quickstart
+
+```bash
+# After project install, query the harness
+scripts/bin/harness-cli query matrix
+scripts/bin/harness-cli query tools --capability deploy-verification --status present
+
+# Record intake + story
+scripts/bin/harness-cli intake --type "change-request" --summary "Add health endpoint" --lane tiny
+scripts/bin/harness-cli story add --id US-001 --title "Health check endpoint" --lane tiny
+
+# Run Symphony story
+harness-symphony run <story-id> --prepare-only
+```
+
+**Output conventions**
+- stdout = structured data
+- stderr = diagnostics
+- exit 0 = success
 
 ---
 
