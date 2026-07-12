@@ -12,6 +12,7 @@ exact	docs/stories/epics/E11-symphony-repository-separation/US-094-symphony-prod
 exact	docs/stories/epics/E11-symphony-repository-separation/US-095-cross-repository-standalone-parity-suite.md	historical_allowed	completed migration story summary
 exact	docs/stories/epics/E11-symphony-repository-separation/US-096-standalone-symphony-packaging-and-release-candidate.md	historical_allowed	completed migration story summary
 exact	docs/stories/epics/E11-symphony-repository-separation/US-099-harness-core-regression-closure.md	migration_plan	planned regression story summary
+prefix	docs/stories/epics/E11-symphony-repository-separation/US-099-harness-core-regression-closure	migration_plan	regression closure evidence
 prefix	docs/stories/epics/E11-symphony-repository-separation/evidence	historical_allowed	immutable migration receipts and local verifiers
 prefix	docs/stories/epics/E11-symphony-repository-separation/US-089-separation-boundary-and-frozen-baselines	historical_allowed	completed migration story
 prefix	docs/stories/epics/E11-symphony-repository-separation/US-090-provenance-preserving-symphony-bootstrap	historical_allowed	completed migration story
@@ -31,6 +32,7 @@ exact	scripts/verify-e11-us089.sh	historical_allowed	frozen baseline verifier
 exact	scripts/verify-e11-us090.sh	historical_allowed	bootstrap verifier
 exact	scripts/verify-e11-us091.sh	historical_allowed	standalone workspace verifier
 exact	scripts/verify-e11-us098.sh	migration_plan	active cleanup verifier
+exact	scripts/verify-e11-us099.sh	migration_plan	active core regression verifier
 exact	tests/boundary/assert-harness-only-tree.sh	migration_plan	active ownership boundary
 exact	tests/boundary/assert-symphony-history-allowlist.sh	migration_plan	active history boundary
 exact	tests/boundary/assert-target-symphony-coverage.sh	migration_plan	target ownership proof

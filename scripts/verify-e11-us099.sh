@@ -29,6 +29,8 @@ tests/maintenance/test-harness-cli-release-classification.sh
 tests/maintenance/test-render-changelog-files.sh
 tests/release/test-release-workflow-contract.sh
 tests/release/test-harness-cli-candidate.sh
+(cd docs/stories/epics/E11-symphony-repository-separation/US-099-harness-core-regression-closure/evidence &&
+  shasum -a 256 -c regression-summary.json.sha256)
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) candidate_asset=harness-cli-macos-arm64 ;;
