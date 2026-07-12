@@ -42,5 +42,22 @@ handled explicitly rather than with `|| true`.
 
 ## Acceptance Evidence
 
-Pending implementation. Include the reviewed filter command, commit map,
-source-ref before/after comparison, target clone check, and raw import tag.
+Completed 2026-07-12 after the fresh owner go/no-go recorded in the external
+owner-only vault:
+
+- Frozen source: `6e8243f2a5cb6a32cf0a7a0ecebdb257a429bdd9`.
+- Filtered/provenance commit and remote `main`:
+  `5db694c8fd43a7d0e34bd9eaf9030d18b856f2b5`.
+- Annotated tag `symphony-raw-import-20260712` peels to the same commit.
+- Exact 100-path manifest SHA-256:
+  `e949ed330ace1e6ae80aa0bbe737dce831732d18bef62edf288eb00f8de876cf`.
+- Recovery bundle SHA-256:
+  `cc6b868567750e139d167e8b674d8016359e0e8c66307446ef15fe6ae4df712d`.
+- Source refs before/after are byte-identical. Only `HEAD:main` and the reviewed
+  annotated tag were pushed; no mirror/all-ref push occurred.
+- Both the disposable filtered repository and a fresh clone pass the
+  fail-closed scope verifier and `git fsck --full`.
+- `/Users/themrb/Documents/personal/symphony` is materialized at the reviewed
+  remote commit with a clean `main` tracking `origin/main`.
+- `scripts/test-verify-e11-us090.sh` proves the story wrapper rejects a clean
+  Git repository with unrelated history.
