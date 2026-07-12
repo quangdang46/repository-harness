@@ -1,215 +1,226 @@
 # repository-harness
 
-Turn any software repo into an agent-ready workspace.
+<div align="center">
+  <img src="repository_harness_illustration.webp" alt="repository-harness — turn any repo into an agent-ready workspace" width="720">
+</div>
 
-`repository-harness` is a repository-level operating harness for Claude Code,
-Codex, Cursor, and other coding agents. It gives agents the missing project
-context they need before they change code: where to start, what the product
-contract says, how risky the work is, what proof is required, and which
-decisions future agents should inherit.
+<div align="center">
 
-The app is what users touch. The harness is what agents touch.
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue.svg)
+![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/quangdang46/repository-harness?include_prereleases)](https://github.com/quangdang46/repository-harness/releases)
 
-## Why Star This Repo
+</div>
 
-Star this repo if you want practical, reusable patterns for making AI-assisted
-software development more reliable, inspectable, and easier for humans to steer.
+**Turn any software repo into an agent-ready workspace.**  
+Coding agents do not only need better prompts — they need better repositories. Harness installs the missing project context: where to start, product contract, risk lane, proof requirements, and decisions future agents should inherit.
 
-This project is exploring a simple idea:
-
-> Coding agents do not only need better prompts. They need better repositories.
-
-## The Problem
-
-Most repos are built for humans reading code in a familiar codebase. Coding
-agents usually enter with only a chat prompt and a shallow snapshot of files.
-That leads to common failure modes:
-
-- The agent edits code before understanding product intent.
-- Important constraints live only in chat history or in someone's head.
-- Validation expectations are vague or discovered too late.
-- Architecture tradeoffs are repeated instead of inherited.
-- Large requests do not get broken into reviewable story-sized work.
-
-## The Harness Approach
-
-A repository starts to have a harness when it helps an agent answer practical
-engineering questions without relying only on chat history:
-
-- What should I read first?
-- What type of work is this?
-- Which product contract does it affect?
-- How risky is the change?
-- What proof will show the work is done?
-- What decision or lesson should future agents inherit?
-
-In this repo, those answers live in:
-
-- `AGENTS.md` — the stable agent shim with local project notes and Harness
-  doc links.
-- `docs/HARNESS.md` — the human-agent collaboration model.
-- `docs/FEATURE_INTAKE.md` — tiny, normal, and high-risk work classification.
-- `docs/ARCHITECTURE.md` — architecture discovery and boundary rules.
-- `docs/TEST_MATRIX.md` — behavior-to-proof validation expectations.
-- `docs/stories/` — story packets and backlog items.
-- `docs/decisions/` — durable decisions and tradeoffs.
-- `docs/templates/` — reusable spec, story, decision, and validation templates.
-
-OpenAI describes this shift as an agent-first world where humans steer and
-agents execute:
-
-https://openai.com/index/harness-engineering/
-
-## Install Harness Into A Project
-
-From a target project directory, run:
+<div align="center">
+<h3>Quick Install</h3>
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.sh?$(date +%s)" | bash -s -- --yes
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/install.sh?$(date +%s)" \
+  | bash -s -- --easy-mode --verify
 ```
 
-On Windows PowerShell, run:
+</div>
 
-```powershell
-# Default install (no flag needed)
-irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" | iex
-```
+---
 
-If the target already has `AGENTS.md`, `docs/`, or `scripts/`, choose one:
+## TL;DR
+
+### The Problem
+
+Most repos are built for humans. Agents enter with a chat prompt and a shallow file snapshot:
+
+| Failure mode | What happens |
+|--------------|--------------|
+| No product intent | Agent edits before understanding the contract |
+| Chat-only constraints | Rules die when the session ends |
+| Vague proof | Validation discovered too late |
+| Repeated tradeoffs | Architecture decisions never get inherited |
+| Monolith prompts | Large requests never become reviewable stories |
+
+### The Solution
+
+**repository-harness** installs a reusable operating layer that agents and humans share:
+
+| Piece | Role |
+|-------|------|
+| `AGENTS.md` | Stable agent shim + Harness doc links |
+| `docs/FEATURE_INTAKE.md` | Tiny / normal / high-risk classification |
+| `docs/HARNESS.md` | Human–agent collaboration model |
+| `docs/stories/` | Story packets and backlog |
+| `docs/decisions/` | Durable tradeoffs |
+| `harness-cli` | Query matrix, tools, stories, decisions |
+| `harness-symphony` | Isolated story runner with reviewable changesets |
+
+### Why Use Harness?
+
+| Feature | What it does |
+|---------|--------------|
+| **Repo-durable context** | Intake, proof, and decisions survive chat history |
+| **Risk lanes** | Tiny / normal / high-risk routing before code changes |
+| **Story packets** | Reviewable units of work with validation expectations |
+| **Decision log** | Future agents inherit tradeoffs instead of rediscovering them |
+| **Tool registry** | Optional capabilities skip cleanly when absent |
+| **Symphony runner** | Isolated workspaces + `SUMMARY.md` / `RESULT.json` |
+
+---
+
+### Quick Example
 
 ```bash
-# Update an existing Harness repo without moving existing files
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.sh?$(date +%s)" | bash -s -- --merge --yes
+# Install binaries
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/install.sh?$(date +%s)" \
+  | bash -s -- --easy-mode --verify
 
-# Back up and replace AGENTS.md, docs/, and scripts/
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.sh?$(date +%s)" | bash -s -- --override --yes
+# Install harness docs into a project
+cd ~/my-project
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.sh?$(date +%s)" \
+  | bash -s -- --yes --claude
+
+# Query the test matrix and available tools
+scripts/bin/harness-cli query matrix
+scripts/bin/harness-cli query tools --capability deploy-verification --status present
+
+# Record intake + a story
+scripts/bin/harness-cli intake \
+  --type "change-request" \
+  --summary "Add health check endpoint" \
+  --lane tiny
+scripts/bin/harness-cli story add \
+  --id US-001 \
+  --title "Health check endpoint" \
+  --lane tiny
 ```
 
-```powershell
-# Update an existing Harness repo (auto-cleanup after install)
-irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1; .\install.ps1 -Merge; Remove-Item install.ps1
+---
 
-# Back up and replace AGENTS.md, docs/, and scripts/
-irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1; .\install.ps1 -Override; Remove-Item install.ps1
-```
+## Design Philosophy
 
-Use `--merge` when a project already has Harness and you want to append newly
-added Harness files without moving the existing `AGENTS.md`, `docs/`, or
-`scripts/` paths into backup. Existing files stay untouched; only missing
-Harness files are created.
+1. **The app is for users. The harness is for agents.**  
+   Product code and agent operating surface are separate. Do not bury agent contracts inside product READMEs alone.
 
-For older Harness installs whose `AGENTS.md` still contains the full generated
-operating guide, refresh it into the small stable shim:
+2. **Session-local prompts are not enough.**  
+   Rules that only live in chat evaporate. Intake rows, stories, decisions, and proof status must be durable.
+
+3. **Classify risk before writing code.**  
+   Tiny work patches directly. Normal work gets a story. High-risk work gets a folder of design + validation docs and human confirmation when direction is ambiguous.
+
+4. **Absent tools skip cleanly.**  
+   A missing linter or deploy check must never hard-fail the flow. Query capabilities first; skip when not present.
+
+5. **Every task can improve the harness.**  
+   Product delta *and* harness delta (docs, templates, backlog, decisions) are both valid outputs.
+
+---
+
+## How Harness Compares
+
+| Feature | Prompt-only | Ad-hoc docs | **Harness** |
+|---------|-------------|-------------|-------------|
+| Agent entrypoint | Chat only | Maybe README | Stable `AGENTS.md` shim |
+| Risk classification | None | Informal | Tiny / normal / high-risk lanes |
+| Story packets | No | Sometimes | Templates + CLI |
+| Decision inheritance | No | Wiki drift | `docs/decisions/` + CLI |
+| Proof tracking | Manual | Scattered | Story proof flags + matrix |
+| Isolated runner | No | Custom scripts | `harness-symphony` |
+| Tool registry | No | Hardcoded | Capability query + skip |
+
+**When to use Harness:**
+- Multi-session agent work on a real product
+- Teams that need reviewable stories and durable decisions
+- Projects where Claude Code / Codex / Cursor need a shared contract
+
+**When Harness might not be ideal:**
+- One-off throwaway scripts
+- Pure library crates with no product surface (still useful, but lighter docs may suffice)
+
+---
+
+## Installation
+
+### Binary (`harness-cli` + `harness-symphony`)
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.sh?$(date +%s)" | bash -s -- --merge --refresh-agent-shim --yes
-```
-
-The refresh backs up the existing file. If it detects the old
-Harness-generated guide, it replaces it with the shim. If the file appears
-custom, it appends or updates a marked Harness block instead of overwriting the
-project's local instructions.
-
-If the project is driven with Claude Code, add `--claude`. Claude Code never
-auto-loads `AGENTS.md`, so without this the installed harness is invisible to
-fresh sessions. The flag installs (or refreshes) a `CLAUDE.md` whose marked
-Harness block `@`-imports `AGENTS.md` and `docs/FEATURE_INTAKE.md` into every
-session's context. An existing `CLAUDE.md` gets the block appended after a
-backup; plain installs without the flag never touch `CLAUDE.md`:
-
-```bash
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.sh?$(date +%s)" | bash -s -- --claude --yes
-```
-
-Or install into a specific path:
-
-```bash
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.sh?$(date +%s)" | bash -s -- --directory /path/to/project --yes
-```
-
-```powershell
-irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1; .\install.ps1 -Directory "C:\path\to\project"; Remove-Item install.ps1
-```
-
-Use `--dry-run` on Bash or `-DryRun` on PowerShell to preview changes before
-writing files.
-
-The installer also downloads the prebuilt Harness CLI for the current platform,
-verifies its `.sha256` checksum, and installs it at
-`scripts/bin/harness-cli` on macOS/Linux or `scripts/bin/harness-cli.exe` on
-Windows. The Rust CLI is the main Harness tool and stable command path.
-
-Harness CLI release assets are published from tags by the
-`Harness CLI Release` GitHub Actions workflow. The installer expects each
-release to include `harness-cli-<platform>` and
-`harness-cli-<platform>.sha256` assets for macOS arm64, macOS x64, Linux x64,
-Linux arm64, and Windows x64. The Windows asset is
-`harness-cli-windows-x64.exe` plus `harness-cli-windows-x64.exe.sha256`.
-
-Merged pull requests are recorded in `CHANGELOG.md` by the
-`Post-Merge Maintenance` workflow. When a merged PR changes the Rust CLI source,
-schema, Cargo metadata, or CLI release packaging, that workflow bumps the CLI
-patch version, updates `scripts/harness-cli-release-tag`, creates a
-`harness-cli-v*` tag, and runs the Harness CLI release build for that tag.
-
-## Quick Install (Binary)
-
-Install `harness-cli` and `harness-symphony` directly:
-
-```bash
-# macOS / Linux
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/install.sh?$(date +%s)" | bash
-
-# With easy PATH setup and verification
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/install.sh?$(date +%s)" | bash -s -- --easy-mode --verify
+# macOS / Linux — recommended
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/install.sh?$(date +%s)" \
+  | bash -s -- --easy-mode --verify
 
 # Windows PowerShell
 irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/install.ps1" | iex
-
-# With custom destination
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/install.sh?$(date +%s)" | bash -s -- --dest ~/bin
-
-# Build from source instead of downloading binary
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/install.sh?$(date +%s)" | bash -s -- --from-source
 ```
 
-## Try The Flow
+### Install Harness docs into a project
 
-The fastest way to understand the harness is to inspect the tiny demo:
+From the target project directory:
 
-- `docs/demo/README.md`: shows how a simple product idea becomes product docs,
-  stories, validation expectations, and decisions before implementation starts.
+```bash
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.sh?$(date +%s)" \
+  | bash -s -- --yes
+```
 
-A typical flow looks like this:
+| Flag | When to use |
+|------|-------------|
+| `--merge` | Project already has `AGENTS.md` / `docs/` — only add missing files |
+| `--override` | Backup then replace Harness paths |
+| `--claude` | Also wire `CLAUDE.md` `@`-imports (Claude Code never auto-loads `AGENTS.md`) |
+| `--refresh-agent-shim` | Convert old full-guide `AGENTS.md` into the stable shim |
+| `--directory PATH` | Install into a specific project |
+| `--dry-run` | Preview without writing |
+
+```powershell
+# Windows
+irm "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.ps1" -OutFile install.ps1
+.\install.ps1 -Merge
+Remove-Item install.ps1
+```
+
+The project installer also downloads the prebuilt CLI (`scripts/bin/harness-cli`), verifies `.sha256`, and places platform binaries for macOS arm64/x64, Linux x64/arm64, and Windows x64.
+
+### From source
+
+```bash
+git clone https://github.com/quangdang46/repository-harness.git
+cd repository-harness
+cargo build --release -p harness-cli -p harness-symphony
+./target/release/harness-cli --help
+./target/release/harness-symphony doctor
+```
+
+---
+
+## Quick Start
+
+```bash
+# After binary install
+harness-cli --help
+harness-symphony doctor
+
+# After project install (from the project root)
+scripts/bin/harness-cli init
+scripts/bin/harness-cli import brownfield   # if you already have markdown state
+scripts/bin/harness-cli query matrix
+scripts/bin/harness-cli query tools --capability deploy-verification --status present
+```
+
+### Typical flow
 
 ```text
-human intent or product spec
-  -> product contract
-  -> feature intake
-  -> story packet
-  -> validation expectations
-  -> implementation work
-  -> decision or lesson captured for future agents
+human intent / product spec
+  → product contract
+  → feature intake (tiny | normal | high-risk)
+  → story packet
+  → validation expectations
+  → implementation
+  → decision / lesson for future agents
 ```
 
-Implementation prompts do not go straight to code. They first pass through
-feature intake, become story-sized work when needed, and then carry both product
-validation and harness maintenance expectations.
+### Harness Symphony
 
-## Try Harness Symphony
-
-Harness Symphony is the local runner for Harness stories. It prepares an
-isolated run workspace, passes an explicit contract to an agent, collects
-`SUMMARY.md` and `RESULT.json`, and keeps durable Harness updates reviewable
-through semantic changesets.
-
-Start here:
-
-- `docs/SYMPHONY_QUICKSTART.md`: first-run instructions and the daily command
-  loop.
-- `docs/SYMPHONY_SCOPE.md`: detailed design and implementation scope.
-
-The usual first commands are:
+Local runner for Harness stories: isolated workspace, explicit agent contract, `SUMMARY.md` + `RESULT.json`, semantic changesets for review.
 
 ```bash
 cargo build -p harness-symphony
@@ -218,99 +229,260 @@ target/debug/harness-symphony work list
 target/debug/harness-symphony run <story-id> --prepare-only
 ```
 
-## Tool Registry
+See [`docs/SYMPHONY_QUICKSTART.md`](docs/SYMPHONY_QUICKSTART.md).
 
-The harness can use optional external tools (linters, code-graph servers,
-deploy checks) without depending on any of them. You register a tool as a
-provider of a *capability*, the harness scans whether it is actually present,
-and a workflow step uses whatever is equipped — an absent tool is a clean skip,
-never a failure.
+---
+
+## Commands
+
+### `harness-cli`
+
+| Command | What it does |
+|---------|--------------|
+| `init` | Create the harness SQLite database |
+| `migrate` | Apply schema migrations |
+| `import brownfield` | Seed DB from existing markdown (TEST_MATRIX, decisions, backlog) |
+| `intake` | Record a feature intake classification |
+| `story add/update/verify` | Manage stories and proof flags |
+| `decision add` / verify | Durable decision records |
+| `backlog add/close` | Harness growth backlog |
+| `tool register/remove/check` | External capability registry |
+| `intervention` | Record human / review / CI / agent interventions |
+| `trace` / `score-trace` / `score-context` | Agent execution traces + quality scoring |
+| `audit` | Drift audit and entropy score |
+| `propose` | Improvement proposals from observed patterns |
+| `db` | Manage harness database changesets |
+| `query matrix/tools/...` | Read harness state |
 
 ```bash
-# register a tool as a provider of a capability
-scripts/bin/harness-cli tool register --name deploy-check --kind cli \
-  --capability deploy-verification --command ./scripts/deploy-check.sh \
-  --responsibility Verification --description "Verify deploy health before release"
+# Intake
+scripts/bin/harness-cli intake \
+  --type "change-request" \
+  --summary "Tighten auth cookie flags" \
+  --lane high-risk \
+  --flags "auth,security"
 
-# scan presence (writes present/missing/unknown)
+# Story with proof flags (numeric booleans only)
+scripts/bin/harness-cli story add \
+  --id US-014 \
+  --title "Manager updates role" \
+  --lane high-risk \
+  --verify "cargo test -p auth"
+scripts/bin/harness-cli story update \
+  --id US-014 \
+  --unit 1 --integration 1 --e2e 0 --platform 0
+
+# Tool registry
+scripts/bin/harness-cli tool register \
+  --name deploy-check --kind cli \
+  --capability deploy-verification \
+  --command ./scripts/deploy-check.sh \
+  --responsibility Verification \
+  --description "Verify deploy health before release"
 scripts/bin/harness-cli tool check
-
-# a step looks up what is equipped for a purpose
 scripts/bin/harness-cli query tools --capability deploy-verification --status present
 ```
 
-Kinds (`cli`, `binary`, `mcp`, `skill`, `http`) make it agent-generic: each
-agent runtime uses what it can orchestrate. See `docs/TOOL_REGISTRY.md` for the
-full model, the degrade ladder, and how to wire a tool into a flow step.
+| Tool kind | Use |
+|-----------|-----|
+| `cli` / `binary` | Shell tools |
+| `mcp` | MCP servers |
+| `skill` | Agent skills |
+| `http` | HTTP checks |
 
-## Current State
+Full model: [`docs/TOOL_REGISTRY.md`](docs/TOOL_REGISTRY.md).
 
-This repository is in Harness v0.
+### `harness-symphony`
 
-There is no application implementation and no baked-in product specification
-yet. The current work is the reusable project harness: the file structure,
-agent operating model, feature intake process, story templates, and validation
-expectations that help humans and agents turn a future user-provided spec into
-implementation work.
+```bash
+harness-symphony doctor
+harness-symphony work list
+harness-symphony run <story-id> --prepare-only
+harness-symphony run <story-id>
+```
 
-## Product Sources
-
-No product contract is currently defined.
-
-When a user provides a project specification, add or reference it as the input
-spec for the first buildout, then derive smaller living artifacts from it:
-
-- `docs/product/`: current product contract files, created from the spec.
-- `docs/stories/`: story packets and backlog created from selected work.
-- `docs/TEST_MATRIX.md`: behavior-to-proof control panel.
-- `docs/decisions/`: durable decisions and tradeoffs.
-
-Do not keep a project-specific spec or product breakdown in this harness until
-a real project supplies one.
+---
 
 ## Repository Structure
 
 ```text
 project/
-  AGENTS.md
+  AGENTS.md                 # stable agent shim
+  CLAUDE.md                 # optional @-imports for Claude Code
   README.md
   docs/
-    HARNESS.md
-    FEATURE_INTAKE.md
-    ARCHITECTURE.md
-    TEST_MATRIX.md
-    HARNESS_BACKLOG.md
-    product/
-    stories/
-    decisions/
-    demo/
-    templates/
+    HARNESS.md              # collaboration model
+    FEATURE_INTAKE.md       # risk lanes
+    ARCHITECTURE.md         # boundaries + discovery
+    CONTEXT_RULES.md        # what to load per lane
+    TEST_MATRIX.md          # behavior → proof
+    TOOL_REGISTRY.md
+    product/  stories/  decisions/  templates/
   scripts/
-    README.md
+    bin/harness-cli
 ```
 
-## Contributing
+| Doc | Answers |
+|-----|---------|
+| `AGENTS.md` | What should agents read first? |
+| `FEATURE_INTAKE.md` | Tiny / normal / high-risk? |
+| `ARCHITECTURE.md` | Boundaries and discovery |
+| `TEST_MATRIX.md` | Behavior → proof |
+| `decisions/` | What future agents inherit |
 
-This project is early and benefits most from real-world agent failure cases,
-example harness installs, docs improvements, and reusable workflow patterns.
-See `CONTRIBUTING.md` for contribution ideas.
+---
 
-Useful contributions include:
+## Architecture
 
-- Show how the harness works in a real project.
-- Add missing templates or improve existing ones.
-- Propose validation patterns for different stacks.
-- Share failures where an agent made the wrong change because the repo lacked
-  context.
-- Compare harness behavior across Claude Code, Codex, Cursor, and other tools.
+```text
+┌──────────────────────────────────────────────────────────────┐
+│ Human intent / product spec                                  │
+└────────────────────────────┬─────────────────────────────────┘
+                             ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Feature intake (tiny | normal | high-risk)                   │
+│  docs/FEATURE_INTAKE.md + harness-cli intake                 │
+└────────────────────────────┬─────────────────────────────────┘
+                             ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Story packet + validation expectations                       │
+│  docs/stories/ + harness-cli story                           │
+└────────────────────────────┬─────────────────────────────────┘
+                             ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Agent work loop                                              │
+│  AGENTS.md · CONTEXT_RULES · tool registry · Symphony        │
+└──────────────┬───────────────────────────────┬───────────────┘
+               ▼                               ▼
+┌──────────────────────────┐   ┌──────────────────────────────┐
+│ Product delta            │   │ Harness delta                │
+│ code · tests · API       │   │ decisions · backlog · docs   │
+└──────────────────────────┘   └──────────────────────────────┘
+               │                               │
+               └───────────────┬───────────────┘
+                               ▼
+                    Validation proof + next intent
+```
 
-## Share
+Workspace crates:
 
-If this idea resonates, please star the repo and share it with someone building
-with coding agents.
+| Crate | Role |
+|-------|------|
+| `harness-cli` | Durable SQLite layer + operational CLI |
+| `harness-symphony` | Isolated story runner |
 
-Short description:
+---
 
-> An agent-ready repo harness for Claude Code, Codex, Cursor, and other coding
-> agents: AGENTS.md, product contracts, story packets, validation matrix, and
-> decision records.
+## Troubleshooting
+
+### `harness-cli: command not found`
+
+```bash
+# Re-run installer with PATH update
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/install.sh?$(date +%s)" \
+  | bash -s -- --easy-mode --verify
+
+# Or use the project-local binary
+./scripts/bin/harness-cli --help
+```
+
+### Claude Code ignores `AGENTS.md`
+
+Claude Code does **not** auto-load `AGENTS.md`. Reinstall project docs with `--claude` so `CLAUDE.md` `@`-imports the required harness files:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/scripts/install-harness.sh?$(date +%s)" \
+  | bash -s -- --yes --claude --merge
+```
+
+### `story update` rejects proof flags
+
+Proof flags are **numeric booleans** (`0` / `1`), not `yes` / `no`:
+
+```bash
+scripts/bin/harness-cli story update --id US-014 --unit 1 --integration 1 --e2e 0 --platform 0
+```
+
+### Symphony doctor fails
+
+```bash
+harness-symphony doctor
+# Fix reported paths / permissions, then:
+cargo build -p harness-symphony
+```
+
+### Checksum verification failed during install
+
+```bash
+# Retry with a fresh fetch (cache-bust query is intentional)
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/repository-harness/main/install.sh?$(date +%s)" \
+  | bash -s -- --easy-mode --verify
+```
+
+---
+
+## Limitations
+
+### What Harness Doesn't Do (Yet)
+
+- **Not a product app** — this repo is the harness, not an end-user product
+- **Does not replace judgment** — humans still set intent; harness reduces context failure
+- **CLI flags may shift** before v1.0 as CLI + docs co-evolve
+- **No baked-in product domains** — derive living product docs from a real project spec
+
+### Known Limitations
+
+| Capability | Current state | Notes |
+|------------|---------------|-------|
+| Product scaffolding | ❌ Out of scope | Bring your own app stack |
+| Claude Code auto-load | ⚠️ Needs `--claude` | Without it, sessions miss `AGENTS.md` |
+| Symphony required | ❌ Optional | Docs + CLI work alone |
+| Multi-host VCS | ⚠️ GitHub-oriented workflows | Local git is fine; remote hosts vary |
+
+---
+
+## FAQ
+
+### Prompt engineering vs harness?
+
+Prompts are session-local. Harness is repo-durable — intake, proof, and decisions survive chat history.
+
+### Does this replace AGENTS.md?
+
+No. It *standardizes* a small stable `AGENTS.md` shim that points into living docs.
+
+### Is Symphony required?
+
+No. Docs + `harness-cli` work alone. Symphony is the optional local story runner.
+
+### What is a “tiny” vs “high-risk” lane?
+
+See [`docs/FEATURE_INTAKE.md`](docs/FEATURE_INTAKE.md). Auth, authorization, data loss, audit/security, external providers, and weak validation are hard gates into high-risk.
+
+### Can I install into a brownfield repo?
+
+Yes — use `--merge` to only add missing files, then `harness-cli import brownfield` to seed the DB from existing markdown.
+
+### Where is state stored?
+
+Markdown under `docs/` plus a local SQLite database managed by `harness-cli` (`init` / `migrate`).
+
+---
+
+## About Contributions
+
+Please don't take this the wrong way, but I do not accept outside contributions for any of my projects. I simply don't have the mental bandwidth to review anything, and it's my name on the thing, so I'm responsible for any problems it causes; thus, the risk-reward is highly asymmetric from my perspective. I'd also have to worry about other "stakeholders," which seems unwise for tools I mostly make for myself for free. Feel free to submit issues, and even PRs if you want to illustrate a proposed fix, but know I won't merge them directly. Instead, I'll have Claude or Codex review submissions via `gh` and independently decide whether and how to address them. Bug reports in particular are welcome. Sorry if this offends, but I want to avoid wasted time and hurt feelings. I understand this isn't in sync with the prevailing open-source ethos that seeks community contributions, but it's the only way I can move at this velocity and keep my sanity.
+
+---
+
+## License
+
+[MIT](LICENSE)
+
+---
+
+<div align="center">
+
+**Agent-ready repos for Claude Code, Codex, Cursor, and friends.**
+
+</div>
