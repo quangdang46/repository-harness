@@ -10,21 +10,10 @@ harness.db-shm
 target/
 dist/
 
-# JavaScript dependencies for local web UI packages.
-node_modules/
-*.tsbuildinfo
-
-# Local web UI build and test output.
-desktop-dist/
-test-results/
-tsconfig.tsbuildinfo
-
 # Downloaded Harness CLI binary for installed project instances.
 scripts/bin/harness-cli
 scripts/bin/harness-cli.exe
 
-# Local Symphony runtime state.
-.symphony/
 .harness/*
 !.harness/changesets/
 !.harness/changesets/*.changeset.jsonl
