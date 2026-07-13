@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-07-13 - PR #46
+
+- Harden Harness trust boundaries and pre-merge proof (@hoangnb24)
+- Merge commit: `15e1d2eceea21d4a535e4f1c9c19d5e7b369c42c`
+- Harness CLI release: `harness-cli-v0.1.16`
+- Changed files: 53 total (first 20 shown)
+  - `.github/workflows/harness-cli-release.yml`
+  - `.github/workflows/premerge.yml`
+  - `AGENTS.md`
+  - `CLAUDE.md`
+  - `README.md`
+  - `crates/harness-cli/Cargo.toml`
+  - `crates/harness-cli/src/domain.rs`
+  - `crates/harness-cli/src/infrastructure.rs`
+  - `crates/harness-cli/src/interface.rs`
+  - `docs/ARCHITECTURE.md`
+  - `docs/CONTEXT_RULES.md`
+  - `docs/FEATURE_INTAKE.md`
+  - `docs/HARNESS.md`
+  - `docs/README.md`
+  - `docs/TEST_MATRIX.md`
+  - `docs/TOOL_REGISTRY.md`
+  - `docs/contracts/harness-orchestration-v1.md`
+  - `docs/demo/README.md`
+  - `docs/product/README.md`
+  - `docs/stories/epics/E01-durable-layer/US-002-rust-harness-cli/validation.md`
+  - _… 33 additional file(s) omitted from this entry._
+
 ## 2026-07-13 - PR #45
 
 - feat(cutover): complete E11 repository separation (@hoangnb24)
