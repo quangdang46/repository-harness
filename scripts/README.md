@@ -301,9 +301,12 @@ scripts/build-harness-cli-release.sh --target x86_64-unknown-linux-gnu
 ```
 
 GitHub releases are produced by
-`.github/workflows/harness-cli-release.yml`. Push a tag matching
-`harness-cli-v*` to run the verification job, build all supported targets on
-native hosted runners, and upload these release assets:
+`.github/workflows/harness-cli-release.yml`. Post-merge automation or an
+explicit manual dispatch supplies a desired `harness-cli-v*` tag and an exact
+main-branch source ref. The workflow verifies the untagged candidate, builds all
+supported targets on native hosted runners, and creates the annotated tag only
+after every platform and upgrade-transition check passes. It then publishes
+these release assets without overwriting an existing release:
 
 - `harness-cli-macos-arm64`
 - `harness-cli-macos-arm64.sha256`
@@ -318,8 +321,10 @@ native hosted runners, and upload these release assets:
 
 Merged PRs are handled by `.github/workflows/post-merge-maintenance.yml`. The
 workflow always prepends a PR summary to `CHANGELOG.md`. If the merged PR
-changed `crates/harness-cli/`, `scripts/schema/`, Cargo metadata, or
-`scripts/build-harness-cli-release.sh`, it also increments the CLI patch
-version, updates `scripts/harness-cli-release-tag`, creates a matching
-`harness-cli-v*` tag, and calls the reusable Harness CLI release workflow for
-the tagged ref.
+changed CLI source, schema, Cargo metadata, or release proof/promotion
+packaging, it also increments the CLI patch version, updates
+`scripts/harness-cli-release-tag`, and calls the reusable workflow with the
+exact maintenance commit. The old `v0.1.14` upgrade source is checked against a
+frozen historical contract; the built and installed candidate are checked
+against the current strict contract. A failed tag is consumed and immutable,
+so recovery advances to a later patch version.

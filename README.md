@@ -152,9 +152,9 @@ scripts/bootstrap-harness.sh
 .\scripts\bootstrap-harness.ps1
 ```
 
-Harness CLI release assets are published from tags by the
+Harness CLI release assets are built and proven before tag promotion by the
 `Harness CLI Release` GitHub Actions workflow. The installer expects each
-release to include `harness-cli-<platform>` and
+published release to include `harness-cli-<platform>` and
 `harness-cli-<platform>.sha256` assets for macOS arm64, macOS x64, Linux x64,
 Linux arm64, and Windows x64. The Windows asset is
 `harness-cli-windows-x64.exe` plus `harness-cli-windows-x64.exe.sha256`.
@@ -162,8 +162,11 @@ Linux arm64, and Windows x64. The Windows asset is
 Merged pull requests are recorded in `CHANGELOG.md` by the
 `Post-Merge Maintenance` workflow. When a merged PR changes the Rust CLI source,
 schema, Cargo metadata, or CLI release packaging, that workflow bumps the CLI
-patch version, updates `scripts/harness-cli-release-tag`, creates a
-`harness-cli-v*` tag, and runs the Harness CLI release build for that tag.
+patch version, updates `scripts/harness-cli-release-tag`, and submits the exact
+maintenance commit as a release candidate. The reusable workflow builds and
+tests all five platforms, verifies the pinned `v0.1.14` upgrade transition,
+then creates the annotated `harness-cli-v*` tag and publishes the ten binary and
+checksum assets. Failed tags are never moved or reused.
 
 ## Try The Flow
 

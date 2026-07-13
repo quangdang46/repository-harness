@@ -2,7 +2,9 @@
 
 ## Status
 
-implemented
+`US-101` is implemented. `US-102` is in progress after post-merge release run
+`29222332569` exposed a historical-smoke boundary and proof-before-promotion
+gap.
 
 ## Intake
 
@@ -48,6 +50,15 @@ depend on earlier invariants but must not weaken them.
 Completed on 2026-07-13 through commits `725a9ea`, `153a76f`, `acba26e`,
 `fad321a`, and `6bd7bb0`; the final proof record is in the US-101 validation
 document.
+
+## Post-Merge Recovery
+
+`US-102 Post-Merge Release Recovery And Proof-Before-Promotion` keeps the
+failed `harness-cli-v0.1.16` tag immutable, separates the frozen `0.1.14`
+upgrade-source baseline from current candidate proof, adds pre-merge transition
+coverage, and moves release tag creation behind the complete platform matrix.
+Its governing decision is
+`docs/decisions/0010-proof-before-cli-release-promotion.md`.
 
 ## Exit Signal
 

@@ -4,7 +4,9 @@
 
 - Harden Harness trust boundaries and pre-merge proof (@hoangnb24)
 - Merge commit: `15e1d2eceea21d4a535e4f1c9c19d5e7b369c42c`
-- Harness CLI release: `harness-cli-v0.1.16`
+- Harness CLI publication attempt: `harness-cli-v0.1.16` (post-merge validation
+  failed; the tag is preserved unchanged and no GitHub Release or assets were
+  published)
 - Changed files: 53 total (first 20 shown)
   - `.github/workflows/harness-cli-release.yml`
   - `.github/workflows/premerge.yml`
