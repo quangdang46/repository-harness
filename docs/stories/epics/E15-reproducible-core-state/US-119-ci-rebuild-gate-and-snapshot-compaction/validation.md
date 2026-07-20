@@ -18,7 +18,9 @@ git diff --check
   snapshot and JSONL.
 - `.github/workflows/premerge.yml` asserts the writable database is absent and
   bootstraps tracked state before Linux and Windows validation;
-  `tests/ci/test-core-state-rebuild-gate.sh` locks in that ordering.
+  `tests/ci/test-core-state-rebuild-gate.sh` locks in that ordering and proves
+  every tracked changeset has `eol=lf`. This keeps manifest-verified JSONL bytes
+  identical when Git checks out the repository on Windows with CRLF defaults.
 - `tests/snapshot/test-core-snapshot-compaction.sh` proves verified replacement,
   changed logical identity, stale-precondition refusal with an unchanged tuple,
   and successful materialization from the compacted candidate.

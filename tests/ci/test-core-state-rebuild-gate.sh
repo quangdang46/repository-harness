@@ -4,6 +4,10 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 workflow="$root/.github/workflows/premerge.yml"
 
+while IFS= read -r changeset; do
+  [[ $(git -C "$root" check-attr eol -- "$changeset") == "$changeset: eol: lf" ]]
+done < <(git -C "$root" ls-files '.harness/changesets/*.changeset.jsonl')
+
 linux_absent=$(grep -n 'test ! -e harness.db' "$workflow" | head -n1 | cut -d: -f1)
 linux_bootstrap=$(grep -n 'scripts/bootstrap-harness.sh' "$workflow" | head -n1 | cut -d: -f1)
 linux_parity=$(grep -n 'scripts/verify-materialized-core-parity.sh' "$workflow" | head -n1 | cut -d: -f1)
@@ -20,4 +24,4 @@ grep -Fq 'scripts/verify-materialized-core-parity.sh' "$root/scripts/validate-pr
 grep -Fq 'tests/worktrees/test-core-state-conflict-recovery.sh' "$root/scripts/validate-premerge.sh"
 grep -Fq 'tests/snapshot/test-core-snapshot-compaction.sh' "$root/scripts/validate-premerge.sh"
 
-echo "fresh-checkout Linux and Windows bootstrap ordering and reproducible-state CI gates passed"
+echo "canonical JSONL checkout bytes, fresh-checkout Linux and Windows bootstrap ordering, and reproducible-state CI gates passed"
