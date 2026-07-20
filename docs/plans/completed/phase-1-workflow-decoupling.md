@@ -4,8 +4,8 @@ Date: 2026-07-20
 
 ## Status
 
-Implementation complete. Focused workflow, installer, documentation, and
-compatibility checks pass; full pre-merge validation is pending.
+Completed and activated. Focused checks and the full pre-merge repository
+contract pass.
 
 ## Anchor
 
@@ -64,7 +64,7 @@ Phase 1 must preserve these behaviors:
 7. Existing databases, semantic changesets, CLI commands, and external
    orchestration contracts remain readable and compatible throughout Phase 1.
 
-## Current Behavior
+## Prior Behavior
 
 The current change workflow requires bootstrap, durable intake, matrix
 retrieval, lane-specific context, story and proof records for normal or
@@ -328,6 +328,12 @@ Passing Harness status or trace scores are explicitly not Phase 1 evidence.
   the existing control-plane task evaluation. The new fixture exercises real
   file mutation and a visible executable boundary without pretending to measure
   model quality.
+- 2026-07-20: Run the full pre-merge contract from a fresh detached worktree so
+  proof uses tracked state and does not overwrite a checkout-owned ignored
+  database. All gates passed.
+- 2026-07-20: Activate decision `0019` and retain the SQLite control plane as an
+  explicit compatibility surface after the reduced workflow passed its
+  acceptance and rollback checks.
 
 ## Progress
 
@@ -338,12 +344,15 @@ Passing Harness status or trace scores are explicitly not Phase 1 evidence.
 - [x] Implement the repository workflow, durable-plan lifecycle, documentation
       hierarchy, compatibility boundaries, and installer payload.
 - [x] Validate representative tasks and focused compatibility paths.
-- [ ] Run the full pre-merge repository contract.
-- [ ] Move this plan to `docs/plans/completed/` with the final result.
+- [x] Run the full pre-merge repository contract.
+- [x] Move this plan to `docs/plans/completed/` with the final result.
 
 ## Result
 
-Implementation is complete and focused validation passes.
+Phase 1 is implemented, validated, and active. The default path now uses the
+repository and Git-native plans without Harness CLI mutations, while the
+existing CLI, SQLite state, changesets, protocol, installer upgrades, and
+release behavior remain compatible.
 
 Measured workflow comparison:
 
@@ -365,8 +374,12 @@ tests/installer/test-install-harness-modes.sh
 tests/evals/test-task-authority.sh
 tests/protocol/smoke-native-artifact.sh target/debug/harness-cli
 git diff --check
+scripts/validate-premerge.sh (fresh detached worktree at 232e0e3)
 ```
 
 The local environment does not provide `pwsh`; the PowerShell assertions are
-covered statically here and remain part of the Windows pre-merge workflow. Full
-repository validation remains before activation and archival.
+covered statically here and remain part of the Windows pre-merge workflow. The
+first full-gate attempt correctly found that this checkout's ignored
+`harness.db` differed from the tracked core snapshot; that local database was
+left untouched. A fresh detached worktree bootstrapped only from tracked state
+and passed the complete repository contract.

@@ -33,9 +33,9 @@ or validation requirements. Keep local implementation choices in the plan.
 
 ## Active Plans
 
-- `phase-1-workflow-decoupling.md`: replace the mandatory database-centered task
-  lifecycle with the repository-centered default workflow.
+No active execution plans are currently indexed.
 
 ## Completed Plans
 
-See `completed/README.md`.
+See `completed/README.md`. Phase 1 workflow decoupling is retained there because
+it records a consequential source-of-truth and compatibility transition.

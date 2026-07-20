@@ -26,7 +26,7 @@ consumer payload.
 | [0006](./0006-phase-4-benchmark-triage.md) | Compatibility | Phase 4 Benchmark Triage |
 | [0007](./0007-improvement-proposal-rules.md) | Compatibility | Improvement Proposal Rules |
 | [0011](./0011-reproducible-core-state.md) | Accepted | Reproducible Core State |
-| [0019](./0019-repository-centered-default-workflow.md) | Accepted | Repository-Centered Default Workflow |
+| [0019](./0019-repository-centered-default-workflow.md) | Active | Repository-Centered Default Workflow |
 
 Add a decision when:
 

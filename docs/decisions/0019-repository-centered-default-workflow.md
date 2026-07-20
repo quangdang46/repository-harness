@@ -4,12 +4,12 @@ Date: 2026-07-20
 
 ## Status
 
-Accepted. Activation requires completion and validation of the Phase 1 workflow
-decoupling plan.
+Accepted and active. Phase 1 implementation and the full pre-merge repository
+contract completed on 2026-07-20.
 
 ## Context
 
-The current Harness default requires agents making repository changes to
+The prior Harness default required agents making repository changes to
 bootstrap a SQLite control plane, record intake, retrieve a durable proof
 matrix, create or update story state for normal and high-risk work, record a
 manual trace, and optionally score context, audit entropy, or create improvement
@@ -33,7 +33,7 @@ validation, and recurring targeted cleanup.
 
 ## Decision
 
-Harness will adopt a repository-centered default workflow.
+Harness adopts a repository-centered default workflow.
 
 1. `AGENTS.md` remains a small map to product, design, plan, operation, and
    validation truth. It is not a comprehensive operating manual.
@@ -60,8 +60,8 @@ Harness will adopt a repository-centered default workflow.
 10. Fresh installations adopt the repository-centered default. Existing
     installations change only through an explicit backed-up refresh or upgrade.
 
-The governing execution plan is
-`docs/plans/active/phase-1-workflow-decoupling.md`.
+The source implementation is recorded in
+`docs/plans/completed/phase-1-workflow-decoupling.md`.
 
 This decision and its plan are intentionally recorded only as Git-native
 artifacts. They do not create intake, story, matrix, trace, backlog, or decision
@@ -102,8 +102,8 @@ Positive:
 
 Tradeoffs:
 
-- Existing policy documents will temporarily describe a lifecycle that is being
-  demoted and must be clearly marked to avoid contradictory authority.
+- Compatibility documents continue to describe the prior lifecycle and must
+  retain clear boundaries so they do not regain default authority.
 - Repositories with weak native tests or application observability will expose
   real proof gaps previously obscured by Harness proof metadata.
 - Active work and completion queries will no longer have one universal SQLite
@@ -115,11 +115,7 @@ Tradeoffs:
 
 ## Follow-Up
 
-- Implement and validate
-  `docs/plans/active/phase-1-workflow-decoupling.md`.
-- Keep the current default active until the plan's compatibility and
-  representative-task acceptance criteria pass.
-- After activation, invest in Phase 2 application legibility: worktree-local
+- Invest next in Phase 2 application legibility: worktree-local
   execution, direct application interaction, logs, metrics, and focused
   validation discovery.
 - Decide later whether orchestration, observability evaluation, and historical
