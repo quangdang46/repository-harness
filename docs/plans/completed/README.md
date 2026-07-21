@@ -19,3 +19,6 @@ instead of creating permanent plan documents.
 - `phase-3-e-inna-brain-application-legibility-pilot.md`: tested the reduced
   core in a real consumer, confirmed application discovery, and exposed that a
   prose ambiguity rule did not reliably stop speculative product policy.
+- `phase-3-decision-boundary-replay.md`: converted the failed consumer task into
+  a compact installed policy gate and verified with a clean replay that a fresh
+  agent stopped before inventing rate-limit semantics or editing the app.

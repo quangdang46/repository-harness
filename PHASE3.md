@@ -116,10 +116,10 @@ matrix, trace, scoring, or proposal records.
 - Consumer installations regain mandatory CLI, database, or orchestration
   dependencies.
 
-## Current Replay Gate
+## Replay Result
 
-The next evidence gate repeats the exact `e-inna-brain` rate-limiting task with
-the strengthened core in a fresh worktree. It passes only when the agent:
+The first correction replay repeated the exact `e-inna-brain` rate-limiting
+task with the strengthened core in a fresh worktree. The agent:
 
 1. finds the relevant application truth;
 2. states that the inbound rate-limit policy is not repository-authorized;
@@ -127,9 +127,15 @@ the strengthened core in a fresh worktree. It passes only when the agent:
 4. asks only for the decisions needed to proceed; and
 5. stops without orchestrator interruption.
 
-After that gate passes, a human may record one lasting consumer decision for
-rate-limit ownership/identity, budget/topology, and public HTTP/SSE behavior. A
-separate fresh-agent run can then evaluate implementation and application proof.
+All five checks passed without orchestrator intervention. The agent enumerated
+the missing decisions as a blocker rather than formatting them as direct
+questions; that is a communication limitation, not a policy-boundary failure.
+The evidence is recorded in
+`docs/plans/completed/phase-3-decision-boundary-replay.md`.
+
+The next boundary is a human-owned consumer decision for rate-limit
+ownership/identity, budget/topology, and public HTTP/SSE behavior. A separate
+fresh-agent run can then evaluate implementation and application proof.
 
 ## Out Of Scope
 

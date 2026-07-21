@@ -96,7 +96,8 @@ require scripts/README.md 'By default the installer copies only the repository-c
 require docs/README.md '## Installed Core'
 require docs/README.md '## Optional Source Indexes'
 require docs/compatibility/README.md '## Install Boundary'
-require PHASE3.md '## Current Replay Gate'
+require PHASE3.md '## Replay Result'
+require PHASE3.md 'All five checks passed without orchestrator intervention.'
 require docs/compatibility/phase-3-active-observability-legacy.md 'Historical compatibility plan.'
 require docs/provenance/README.md 'source evidence, not default task'
 
