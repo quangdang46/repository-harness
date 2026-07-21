@@ -29,6 +29,9 @@ require AGENTS.md 'No Harness CLI operation is required.'
 require docs/WORKFLOW.md '### Bounded Change'
 require docs/WORKFLOW.md '### Durable Planned Change'
 require docs/WORKFLOW.md '### Does The Work Need Human Judgment?'
+require AGENTS.md 'configurable defaults are not authority'
+require docs/WORKFLOW.md '`Add rate limiting` without a quota'
+require docs/WORKFLOW.md 'must stop'
 require docs/HARNESS.md 'ordinary repository task'
 require docs/CONTEXT_RULES.md 'The mandatory entry context is `AGENTS.md` plus `docs/WORKFLOW.md`'
 require README.md 'The default path requires no local database.'
@@ -93,6 +96,8 @@ require scripts/README.md 'By default the installer copies only the repository-c
 require docs/README.md '## Installed Core'
 require docs/README.md '## Optional Source Indexes'
 require docs/compatibility/README.md '## Install Boundary'
+require PHASE3.md '## Current Replay Gate'
+require docs/compatibility/phase-3-active-observability-legacy.md 'Historical compatibility plan.'
 require docs/provenance/README.md 'source evidence, not default task'
 
 for executable in \
