@@ -26,17 +26,24 @@ should publish a fresh CLI release for downstream installers.
 - Merged PRs to `main` prepend a summary entry to `CHANGELOG.md`.
 - PRs that do not touch CLI files update only the changelog.
 - PRs that touch CLI source, schema, Cargo metadata, or release packaging bump
-  the CLI patch version, update `scripts/harness-cli-release-tag`, create a
-  matching `harness-cli-v*` tag, and publish release assets.
-- Manual and tag-driven CLI releases continue to use the same release workflow.
+  the CLI patch version, update `scripts/harness-cli-release-tag`, prove the
+  exact candidate on every platform, create a matching annotated
+  `harness-cli-v*` tag, and publish release assets.
+- Automatic and manually dispatched releases use the same prove-then-promote
+  workflow. A direct tag push is not a publication entry point.
+- Historical upgrade sources run a frozen version-specific contract; current
+  candidate binaries run the current strict contract.
+- Failed release tags remain immutable and recovery advances to a later patch
+  version.
 
 ## Design Notes
 
 - Commands: GitHub Actions workflows.
 - Domain rules: CLI release detection is path-based and scoped to files that can
   affect the Rust CLI binary, schema, Cargo metadata, or packaging output.
-- Release flow: the post-merge workflow commits maintenance metadata, tags that
-  commit when needed, then calls the reusable release workflow for the tag.
+- Release flow: the post-merge workflow commits maintenance metadata and calls
+  the reusable workflow with that exact commit. The release workflow verifies
+  and builds it, then the publish job creates the tag with a non-force push.
 
 ## Validation
 
@@ -49,7 +56,7 @@ When updating durable proof status, use numeric booleans:
 | Integration | Existing Rust workspace tests still pass. |
 | E2E | Not run locally; GitHub merge event required. |
 | Platform | Release workflow still targets macOS arm64, macOS x64, Linux x64, Linux arm64, and Windows x64. |
-| Release | Reusable workflow accepts tag/manual/reusable entry points. |
+| Release | Manual/reusable candidates are proven before an immutable tag and assets are created. |
 
 ## Harness Delta
 
@@ -69,3 +76,8 @@ conditional CLI release preparation after merged pull requests.
   with `-` and were parsed as options on the runner. The workflow now uses
   `printf --` for all bullet formats. Local reproduction of the PR #13
   changelog entry passed.
+- 2026-07-13 follow-up: run `29222332569` proved that applying the evolving
+  current smoke to the immutable `v0.1.14` upgrade source is invalid and that
+  tag-first sequencing can strand a release identity. `US-102` and decision
+  `0010` separate the historical/current contracts and move tag creation behind
+  the complete platform matrix.

@@ -1,11 +1,284 @@
 # Changelog
 
-## 2026-07-07 - PR #4
+## 2026-07-21 - PR #56
 
-- Resolve Symphony Web UI audit findings and improve readability (@quangdang46)
-- Merge commit: `532e3ed8d980a882fb3b2770353405a5e5cdee97`
+- feat(harness): set core maintenance CLI direction (@hoangnb24)
+- Merge commit: `d5bb4db1760d764f24343838f0bda4fc42f079af`
+- Harness CLI candidate: `harness-cli-v0.1.21` (publication requires platform proof)
+- Harness core candidate: `harness-v0.1.1` (publication requires platform proof)
+- Changed files: 61 total (first 20 shown)
+  - `.github/workflows/harness-release.yml`
+  - `.github/workflows/post-merge-maintenance.yml`
+  - `.gitignore`
+  - `AGENTS.md`
+  - `Cargo.lock`
+  - `Cargo.toml`
+  - `README.md`
+  - `crates/harness/Cargo.toml`
+  - `crates/harness/assets/docs/decisions/README.md`
+  - `crates/harness/assets/docs/plans/README.md`
+  - `crates/harness/assets/docs/plans/completed/README.md`
+  - `crates/harness/src/application/mod.rs`
+  - `crates/harness/src/application/ports.rs`
+  - `crates/harness/src/application/service.rs`
+  - `crates/harness/src/domain/mod.rs`
+  - `crates/harness/src/domain/model.rs`
+  - `crates/harness/src/infrastructure/embedded_distribution.rs`
+  - `crates/harness/src/infrastructure/filesystem_state.rs`
+  - `crates/harness/src/infrastructure/git_merge.rs`
+  - `crates/harness/src/infrastructure/mod.rs`
+  - _… 41 additional file(s) omitted from this entry._
+
+## 2026-07-21 - PR #55
+
+- feat(phase5): split optional consumer ownership (@hoangnb24)
+- Merge commit: `e5a5e2464ed5999cb07f2155d1eafb6e79d69a65`
 - Harness CLI release: not required
-- Changed files:
+- Changed files: 16 total
+  - `PHASE5.md`
+  - `README.md`
+  - `docs/HARNESS_COMPONENTS.md`
+  - `docs/README.md`
+  - `docs/compatibility/README.md`
+  - `docs/compatibility/phase-5-evolution-infrastructure-legacy.md`
+  - `docs/decisions/0023-optional-consumer-ownership.md`
+  - `docs/decisions/README.md`
+  - `docs/plans/README.md`
+  - `docs/plans/completed/README.md`
+  - `docs/plans/completed/phase-5-optional-consumer-split.md`
+  - `scripts/validate-premerge.sh`
+  - `tests/boundary/test-phase5-optional-consumer-split.sh`
+  - `tests/docs/test-doc-contracts.sh`
+  - `tests/workflow/test-repository-workflow.sh`
+  - `tests/workflow/test-task-authority.sh`
+
+## 2026-07-21 - PR #54
+
+- feat(phase4): freeze upstream lifecycle writes (@hoangnb24)
+- Merge commit: `3b6ede042847fe71ee8537c43cb55e9e6d57f300`
+- Harness CLI candidate: `harness-cli-v0.1.20` (publication requires platform proof)
+- Changed files: 18 total
+  - `PHASE4.md`
+  - `crates/harness-cli/src/interface.rs`
+  - `docs/HARNESS.md`
+  - `docs/README.md`
+  - `docs/compatibility/README.md`
+  - `docs/compatibility/phase-4-mechanical-verification-legacy.md`
+  - `docs/compatibility/phase-4-write-consumer-inventory.md`
+  - `docs/contracts/harness-orchestration-v1.md`
+  - `docs/decisions/0022-control-plane-freeze-and-compatibility-runway.md`
+  - `docs/decisions/README.md`
+  - `docs/plans/README.md`
+  - `docs/plans/completed/README.md`
+  - `docs/plans/completed/phase-4-control-plane-freeze.md`
+  - `scripts/README.md`
+  - `scripts/validate-premerge.sh`
+  - `tests/boundary/test-phase4-control-plane-freeze.sh`
+  - `tests/changesets/test-automatic-source-capture.sh`
+  - `tests/docs/test-doc-contracts.sh`
+
+## 2026-07-21 - PR #53
+
+- docs(harness): establish Phase 3 application-legibility evidence (@hoangnb24)
+- Merge commit: `225987a250ba522c307c0a4ed19f30d9f146a84e`
+- Harness CLI release: not required
+- Changed files: 19 total
+  - `AGENTS.md`
+  - `PHASE3.md`
+  - `PHASE4.md`
+  - `PHASE5.md`
+  - `docs/README.md`
+  - `docs/WORKFLOW.md`
+  - `docs/compatibility/README.md`
+  - `docs/compatibility/phase-3-active-observability-legacy.md`
+  - `docs/decisions/0020-installation-profiles-and-knowledge-boundaries.md`
+  - `docs/decisions/0021-consumer-first-application-legibility-phase.md`
+  - `docs/decisions/README.md`
+  - `docs/plans/completed/README.md`
+  - `docs/plans/completed/phase-3-decision-boundary-replay.md`
+  - `docs/plans/completed/phase-3-durable-state-publication.md`
+  - `docs/plans/completed/phase-3-e-inna-brain-application-legibility-pilot.md`
+  - `scripts/agent-harness-block.md`
+  - `tests/docs/test-doc-contracts.sh`
+  - `tests/evals/test-repository-workflow.sh`
+  - `tests/installer/assert-agent-authority-contract.sh`
+
+## 2026-07-21 - PR #52
+
+- feat(installer): make CLI an optional compatibility profile (@hoangnb24)
+- Merge commit: `5d31cee1f98b161c0b1124c4ff4a1024d94f2f94`
+- Harness CLI release: not required
+- Changed files: 23 total (first 20 shown)
+  - `README.md`
+  - `docs/README.md`
+  - `docs/compatibility/README.md`
+  - `docs/decisions/0019-repository-centered-default-workflow.md`
+  - `docs/decisions/0020-installation-profiles-and-knowledge-boundaries.md`
+  - `docs/decisions/README.md`
+  - `docs/plans/README.md`
+  - `docs/plans/completed/README.md`
+  - `docs/plans/completed/phase-2-knowledge-boundary-and-payload-reduction.md`
+  - `docs/product/installation-profiles.md`
+  - `docs/provenance/README.md`
+  - `scripts/README.md`
+  - `scripts/harness-cli-install-files.txt`
+  - `scripts/harness-install-files.txt`
+  - `scripts/install-harness.ps1`
+  - `scripts/install-harness.sh`
+  - `scripts/test-install-harness-cli-upgrade.sh`
+  - `tests/docs/test-doc-contracts.sh`
+  - `tests/installer/assert-agent-authority-contract.sh`
+  - `tests/installer/assert-consumer-changeset-trackable.sh`
+  - _… 3 additional file(s) omitted from this entry._
+
+## 2026-07-20 - PR #51
+
+- feat(workflow): adopt repository-centered default workflow (@hoangnb24)
+- Merge commit: `27411b2c33bc2199fe3dde27a3473ddcdcdfa333`
+- Harness CLI candidate: `harness-cli-v0.1.19` (publication requires platform proof)
+- Changed files: 48 total (first 20 shown)
+  - `AGENTS.md`
+  - `README.md`
+  - `docs/ARCHITECTURE.md`
+  - `docs/CONTEXT_RULES.md`
+  - `docs/FEATURE_INTAKE.md`
+  - `docs/GLOSSARY.md`
+  - `docs/HARNESS.md`
+  - `docs/HARNESS_AUDIT.md`
+  - `docs/HARNESS_BACKLOG.md`
+  - `docs/HARNESS_COMPONENTS.md`
+  - `docs/HARNESS_MATURITY.md`
+  - `docs/IMPROVEMENT_PROTOCOL.md`
+  - `docs/README.md`
+  - `docs/TEST_MATRIX.md`
+  - `docs/TOOL_REGISTRY.md`
+  - `docs/TRACE_SPEC.md`
+  - `docs/WORKFLOW.md`
+  - `docs/decisions/0001-harness-first-development.md`
+  - `docs/decisions/0003-generic-spec-intake-harness.md`
+  - `docs/decisions/0004-sqlite-durable-layer.md`
+  - _… 28 additional file(s) omitted from this entry._
+
+## 2026-07-20 - PR #50
+
+- feat(core-state): make source state reproducible (@hoangnb24)
+- Merge commit: `9552c55d25ab32ce745f5ad715cf58f38add1c54`
+- Harness CLI candidate: `harness-cli-v0.1.18` (publication requires platform proof)
+- Changed files: 71 total (first 20 shown)
+  - `.gitattributes`
+  - `.github/workflows/premerge.yml`
+  - `.gitignore`
+  - `.harness/changesets/run_20260720_e15_execution_intake.changeset.jsonl`
+  - `.harness/changesets/run_20260720_e15_reproducible_core_state.changeset.jsonl`
+  - `.harness/changesets/run_20260720_e15_us115.changeset.jsonl`
+  - `.harness/changesets/run_20260720_e15_us116.changeset.jsonl`
+  - `.harness/changesets/run_20260720_e15_us117.changeset.jsonl`
+  - `.harness/changesets/run_20260720_e15_us117_complete.changeset.jsonl`
+  - `.harness/changesets/run_20260720_e15_us118.changeset.jsonl`
+  - `.harness/changesets/run_20260720_e15_us119.changeset.jsonl`
+  - `.harness/changesets/run_auto_01784535496798252000_0000047583_000000.changeset.jsonl`
+  - `.harness/changesets/run_auto_01784549926906970000_0000020925_000000.changeset.jsonl`
+  - `.harness/changesets/run_auto_01784550199340549000_0000025691_000000.changeset.jsonl`
+  - `.harness/changesets/run_auto_01784550758040287000_0000037021_000000.changeset.jsonl`
+  - `.harness/core-state/harness.db`
+  - `.harness/core-state/manifest.json`
+  - `README.md`
+  - `crates/harness-cli/src/infrastructure.rs`
+  - `crates/harness-cli/src/interface.rs`
+  - _… 51 additional file(s) omitted from this entry._
+
+## 2026-07-13 - PR #47
+
+- Fix post-merge CLI release recovery (@hoangnb24)
+- Merge commit: `48d8172d8850e7c334e8615f32fe4bbe17dd52a8`
+- Harness CLI candidate: `harness-cli-v0.1.17` (publication requires platform proof)
+- Changed files: 30 total (first 20 shown)
+  - `.github/workflows/harness-cli-release.yml`
+  - `.github/workflows/post-merge-maintenance.yml`
+  - `.github/workflows/premerge.yml`
+  - `.harness/changesets/run_1783916400_us102.changeset.jsonl`
+  - `CHANGELOG.md`
+  - `README.md`
+  - `docs/decisions/0005-prebuilt-rust-harness-cli.md`
+  - `docs/decisions/0010-proof-before-cli-release-promotion.md`
+  - `docs/stories/US-025-post-merge-cli-release-and-changelog.md`
+  - `docs/stories/epics/E12-harness-trust-boundaries/README.md`
+  - `docs/stories/epics/E12-harness-trust-boundaries/US-102-post-merge-release-recovery/design.md`
+  - `docs/stories/epics/E12-harness-trust-boundaries/US-102-post-merge-release-recovery/execplan.md`
+  - `docs/stories/epics/E12-harness-trust-boundaries/US-102-post-merge-release-recovery/overview.md`
+  - `docs/stories/epics/E12-harness-trust-boundaries/US-102-post-merge-release-recovery/validation.md`
+  - `scripts/README.md`
+  - `scripts/harness-cli-release-changed.sh`
+  - `scripts/promote-harness-cli-release-tag.sh`
+  - `scripts/validate-premerge.sh`
+  - `scripts/verify-harness-cli-release-identity.sh`
+  - `tests/docs/test-doc-contracts.sh`
+  - _… 10 additional file(s) omitted from this entry._
+
+## 2026-07-13 - PR #46
+
+- Harden Harness trust boundaries and pre-merge proof (@hoangnb24)
+- Merge commit: `15e1d2eceea21d4a535e4f1c9c19d5e7b369c42c`
+- Harness CLI publication attempt: `harness-cli-v0.1.16` (post-merge validation
+  failed; the tag is preserved unchanged and no GitHub Release or assets were
+  published)
+- Changed files: 53 total (first 20 shown)
+  - `.github/workflows/harness-cli-release.yml`
+  - `.github/workflows/premerge.yml`
+  - `AGENTS.md`
+  - `CLAUDE.md`
+  - `README.md`
+  - `crates/harness-cli/Cargo.toml`
+  - `crates/harness-cli/src/domain.rs`
+  - `crates/harness-cli/src/infrastructure.rs`
+  - `crates/harness-cli/src/interface.rs`
+  - `docs/ARCHITECTURE.md`
+  - `docs/CONTEXT_RULES.md`
+  - `docs/FEATURE_INTAKE.md`
+  - `docs/HARNESS.md`
+  - `docs/README.md`
+  - `docs/TEST_MATRIX.md`
+  - `docs/TOOL_REGISTRY.md`
+  - `docs/contracts/harness-orchestration-v1.md`
+  - `docs/demo/README.md`
+  - `docs/product/README.md`
+  - `docs/stories/epics/E01-durable-layer/US-002-rust-harness-cli/validation.md`
+  - _… 33 additional file(s) omitted from this entry._
+
+## 2026-07-13 - PR #45
+
+- feat(cutover): complete E11 repository separation (@hoangnb24)
+- Merge commit: `2f613bcad6b01985165ccab65c87312142b30026`
+- Harness CLI release: not required
+- Changed files: 24 total (first 20 shown)
+  - `docs/stories/epics/E11-symphony-repository-separation/README.md`
+  - `docs/stories/epics/E11-symphony-repository-separation/US-100-cutover-and-post-separation-audit/design.md`
+  - `docs/stories/epics/E11-symphony-repository-separation/US-100-cutover-and-post-separation-audit/evidence/README.md`
+  - `docs/stories/epics/E11-symphony-repository-separation/US-100-cutover-and-post-separation-audit/evidence/canonical-target-ownership.json`
+  - `docs/stories/epics/E11-symphony-repository-separation/US-100-cutover-and-post-separation-audit/evidence/canonical-target-ownership.json.sha256`
+  - `docs/stories/epics/E11-symphony-repository-separation/US-100-cutover-and-post-separation-audit/evidence/cutover-readiness.json`
+  - `docs/stories/epics/E11-symphony-repository-separation/US-100-cutover-and-post-separation-audit/evidence/proof/clean-install.json`
+  - `docs/stories/epics/E11-symphony-repository-separation/US-100-cutover-and-post-separation-audit/evidence/proof/cleaned-contract.json`
+  - `docs/stories/epics/E11-symphony-repository-separation/US-100-cutover-and-post-separation-audit/evidence/proof/cleaned-smoke.json`
+  - `docs/stories/epics/E11-symphony-repository-separation/US-100-cutover-and-post-separation-audit/evidence/proof/initial-contract.json`
+  - `docs/stories/epics/E11-symphony-repository-separation/US-100-cutover-and-post-separation-audit/evidence/proof/initial-smoke.json`
+  - `docs/stories/epics/E11-symphony-repository-separation/US-100-cutover-and-post-separation-audit/evidence/proof/ownership-audit.json`
+  - `docs/stories/epics/E11-symphony-repository-separation/US-100-cutover-and-post-separation-audit/evidence/proof/runtime-disposition.json`
+  - `docs/stories/epics/E11-symphony-repository-separation/US-100-cutover-and-post-separation-audit/evidence/symphony-release.json`
+  - `docs/stories/epics/E11-symphony-repository-separation/US-100-cutover-and-post-separation-audit/execplan.md`
+  - `docs/stories/epics/E11-symphony-repository-separation/US-100-cutover-and-post-separation-audit/overview.md`
+  - `docs/stories/epics/E11-symphony-repository-separation/US-100-cutover-and-post-separation-audit/validation.md`
+  - `scripts/verify-e11-us100.sh`
+  - `tests/core/assert-durable-state-boundary.sh`
+  - `tests/cutover/assert-canonical-symphony-ownership.sh`
+  - _… 4 additional file(s) omitted from this entry._
+
+## 2026-07-12 - PR #44
+
+- refactor(e11): complete Symphony repository separation (@hoangnb24)
+- Merge commit: `22a6a06ad1cd89026b983108dc5ecae51ee7a655`
+- Harness CLI release: `harness-cli-v0.1.15`
+- Changed files: 465 total (first 20 shown)
   - `.agents/skills/impeccable/SKILL.md`
   - `.agents/skills/impeccable/agents/impeccable_asset_producer.toml`
   - `.agents/skills/impeccable/agents/impeccable_manual_edit_applier.toml`
@@ -26,86 +299,31 @@
   - `.agents/skills/impeccable/reference/extract.md`
   - `.agents/skills/impeccable/reference/harden.md`
   - `.agents/skills/impeccable/reference/hooks.md`
-  - `.agents/skills/impeccable/reference/init.md`
-  - `.agents/skills/impeccable/reference/interaction-design.md`
-  - `.agents/skills/impeccable/reference/layout.md`
-  - `.agents/skills/impeccable/reference/live.md`
-  - `.agents/skills/impeccable/reference/onboard.md`
-  - `.agents/skills/impeccable/reference/optimize.md`
-  - `.agents/skills/impeccable/reference/overdrive.md`
-  - `.agents/skills/impeccable/reference/polish.md`
-  - `.agents/skills/impeccable/reference/product.md`
-  - `.agents/skills/impeccable/reference/quieter.md`
-  - `.agents/skills/impeccable/reference/shape.md`
-  - `.agents/skills/impeccable/reference/typeset.md`
-  - `.agents/skills/impeccable/scripts/command-metadata.json`
-  - `.agents/skills/impeccable/scripts/context-signals.mjs`
-  - `.agents/skills/impeccable/scripts/context.mjs`
-  - `.agents/skills/impeccable/scripts/critique-storage.mjs`
-  - `.agents/skills/impeccable/scripts/detect-csp.mjs`
-  - `.agents/skills/impeccable/scripts/detect.mjs`
-  - `.agents/skills/impeccable/scripts/detector/browser/injected/index.mjs`
-  - `.agents/skills/impeccable/scripts/detector/cli/main.mjs`
-  - `.agents/skills/impeccable/scripts/detector/design-system.mjs`
-  - `.agents/skills/impeccable/scripts/detector/detect-antipatterns-browser.js`
-  - `.agents/skills/impeccable/scripts/detector/detect-antipatterns.mjs`
-  - `.agents/skills/impeccable/scripts/detector/engines/browser/detect-url.mjs`
-  - `.agents/skills/impeccable/scripts/detector/engines/regex/detect-text.mjs`
-  - `.agents/skills/impeccable/scripts/detector/engines/static-html/css-cascade.mjs`
-  - `.agents/skills/impeccable/scripts/detector/engines/static-html/detect-html.mjs`
-  - `.agents/skills/impeccable/scripts/detector/engines/visual/screenshot-contrast.mjs`
-  - `.agents/skills/impeccable/scripts/detector/findings.mjs`
-  - `.agents/skills/impeccable/scripts/detector/node/file-system.mjs`
-  - `.agents/skills/impeccable/scripts/detector/profile/profiler.mjs`
-  - `.agents/skills/impeccable/scripts/detector/registry/antipatterns.mjs`
-  - `.agents/skills/impeccable/scripts/detector/rules/checks.mjs`
-  - `.agents/skills/impeccable/scripts/detector/shared/color.mjs`
-  - `.agents/skills/impeccable/scripts/detector/shared/constants.mjs`
-  - `.agents/skills/impeccable/scripts/detector/shared/inline-ignores.mjs`
-  - `.agents/skills/impeccable/scripts/detector/shared/page.mjs`
-  - `.agents/skills/impeccable/scripts/hook-admin.mjs`
-  - `.agents/skills/impeccable/scripts/hook-before-edit.mjs`
-  - `.agents/skills/impeccable/scripts/hook-lib.mjs`
-  - `.agents/skills/impeccable/scripts/hook.mjs`
-  - `.agents/skills/impeccable/scripts/lib/design-parser.mjs`
-  - `.agents/skills/impeccable/scripts/lib/impeccable-config.mjs`
-  - `.agents/skills/impeccable/scripts/lib/impeccable-paths.mjs`
-  - `.agents/skills/impeccable/scripts/lib/is-generated.mjs`
-  - `.agents/skills/impeccable/scripts/lib/target-args.mjs`
-  - `.agents/skills/impeccable/scripts/live-accept.mjs`
-  - `.agents/skills/impeccable/scripts/live-browser-dom.js`
-  - `.agents/skills/impeccable/scripts/live-browser-session.js`
-  - `.agents/skills/impeccable/scripts/live-browser.js`
-  - `.agents/skills/impeccable/scripts/live-commit-manual-edits.mjs`
-  - `.agents/skills/impeccable/scripts/live-complete.mjs`
-  - `.agents/skills/impeccable/scripts/live-copy-edit-agent.mjs`
-  - `.agents/skills/impeccable/scripts/live-discard-manual-edits.mjs`
-  - `.agents/skills/impeccable/scripts/live-inject.mjs`
-  - `.agents/skills/impeccable/scripts/live-insert.mjs`
-  - `.agents/skills/impeccable/scripts/live-manual-edit-evidence.mjs`
-  - `.agents/skills/impeccable/scripts/live-poll.mjs`
-  - `.agents/skills/impeccable/scripts/live-resume.mjs`
-  - `.agents/skills/impeccable/scripts/live-server.mjs`
-  - `.agents/skills/impeccable/scripts/live-status.mjs`
-  - `.agents/skills/impeccable/scripts/live-target.mjs`
-  - `.agents/skills/impeccable/scripts/live-wrap.mjs`
-  - `.agents/skills/impeccable/scripts/live.mjs`
-  - `.agents/skills/impeccable/scripts/live/browser-script-parts.mjs`
-  - `.agents/skills/impeccable/scripts/live/completion.mjs`
-  - `.agents/skills/impeccable/scripts/live/event-validation.mjs`
-  - `.agents/skills/impeccable/scripts/live/insert-ui.mjs`
-  - `.agents/skills/impeccable/scripts/live/manual-apply.mjs`
-  - `.agents/skills/impeccable/scripts/live/manual-edit-routes.mjs`
-  - `.agents/skills/impeccable/scripts/live/manual-edits-buffer.mjs`
-  - `.agents/skills/impeccable/scripts/live/session-store.mjs`
-  - `.agents/skills/impeccable/scripts/live/svelte-component.mjs`
-  - `.agents/skills/impeccable/scripts/live/sveltekit-adapter.mjs`
-  - `.agents/skills/impeccable/scripts/live/ui-core.mjs`
-  - `.agents/skills/impeccable/scripts/live/vocabulary.mjs`
-  - `.agents/skills/impeccable/scripts/modern-screenshot.umd.js`
-  - `.agents/skills/impeccable/scripts/palette.mjs`
-  - `.agents/skills/impeccable/scripts/pin.mjs`
-  - `.codex/hooks.json`
+  - _… 445 additional file(s) omitted from this entry._
+
+## 2026-07-12 - PR #43
+
+- Publish Harness orchestration protocol v1 and E11 separation foundations
+  (@hoangnb24)
+- Develop merge commit: `fa9fe27e2464ae9e60effcb7b8533f027b76a78b`
+- Harness CLI release: `harness-cli-v0.1.14`
+- The immutable `harness-cli-v0.1.12` tag did not publish a release: its
+  verify job exposed and stopped on a child-exit/stdout-reader race in the
+  retained Symphony adapter test. Version 0.1.13 drains final app-server
+  output before classifying process exit.
+- The immutable `harness-cli-v0.1.13` tag also remained unpublished: four
+  native smokes passed, while Windows exposed an open-file rename violation in
+  snapshot finalization. Version 0.1.14 closes the verified temporary database
+  file before its atomic move and improves PowerShell failure diagnostics.
+- Changed surfaces:
+  - `crates/harness-cli/`
+  - `scripts/schema/013-changeset-content-sha.sql`
+  - `scripts/install-harness.sh`
+  - `scripts/install-harness.ps1`
+  - `.github/workflows/harness-cli-release.yml`
+  - `docs/contracts/harness-orchestration-v1.md`
+  - `docs/stories/epics/E11-symphony-repository-separation/`
+  - `tests/protocol/`
 
 ## 2026-07-07 - PR #37
 
