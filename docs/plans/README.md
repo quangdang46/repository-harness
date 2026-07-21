@@ -37,5 +37,5 @@ No active execution plans are currently indexed.
 
 ## Completed Plans
 
-See `completed/README.md`. Phase 1 workflow decoupling is retained there because
-it records a consequential source-of-truth and compatibility transition.
+See `completed/README.md`. Phase 1 and Phase 2 are retained there because they
+record consequential source-of-truth, payload, and compatibility transitions.
