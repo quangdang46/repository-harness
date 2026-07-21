@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-07-21 - PR #54
+
+- feat(phase4): freeze upstream lifecycle writes (@hoangnb24)
+- Merge commit: `3b6ede042847fe71ee8537c43cb55e9e6d57f300`
+- Harness CLI candidate: `harness-cli-v0.1.20` (publication requires platform proof)
+- Changed files: 18 total
+  - `PHASE4.md`
+  - `crates/harness-cli/src/interface.rs`
+  - `docs/HARNESS.md`
+  - `docs/README.md`
+  - `docs/compatibility/README.md`
+  - `docs/compatibility/phase-4-mechanical-verification-legacy.md`
+  - `docs/compatibility/phase-4-write-consumer-inventory.md`
+  - `docs/contracts/harness-orchestration-v1.md`
+  - `docs/decisions/0022-control-plane-freeze-and-compatibility-runway.md`
+  - `docs/decisions/README.md`
+  - `docs/plans/README.md`
+  - `docs/plans/completed/README.md`
+  - `docs/plans/completed/phase-4-control-plane-freeze.md`
+  - `scripts/README.md`
+  - `scripts/validate-premerge.sh`
+  - `tests/boundary/test-phase4-control-plane-freeze.sh`
+  - `tests/changesets/test-automatic-source-capture.sh`
+  - `tests/docs/test-doc-contracts.sh`
+
 ## 2026-07-21 - PR #53
 
 - docs(harness): establish Phase 3 application-legibility evidence (@hoangnb24)
