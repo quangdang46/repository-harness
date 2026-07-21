@@ -36,6 +36,7 @@ try {
     if (!(Test-Path (Join-Path $Fresh "docs/plans/active/README.md"))) { throw "fresh active-plan path missing" }
     if (!(Test-Path (Join-Path $Fresh "docs/templates/exec-plan.md"))) { throw "fresh execution-plan template missing" }
     if (!(Get-Content -Raw (Join-Path $Fresh "AGENTS.md")).Contains("No Harness CLI operation is required.")) { throw "fresh default still requires control-plane commands" }
+    if ((Get-Content -Raw (Join-Path $Fresh "AGENTS.md")).Contains("Current Upstream Goal")) { throw "fresh default contains upstream repository goal" }
 
     $Full = Join-Path $Temp "full"
     Invoke-Install $Full @("WithCli")

@@ -33,7 +33,9 @@ or validation requirements. Keep local implementation choices in the plan.
 
 ## Active Plans
 
-No active execution plans are currently indexed.
+- `active/rust-harness-core-maintenance-cli.md` — build the Rust `harness` CLI
+  for core installation, safe updates, provenance, and diagnostics while
+  keeping the optional control plane separate.
 
 ## Completed Plans
 

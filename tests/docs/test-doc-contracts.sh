@@ -63,6 +63,7 @@ for file in \
   docs/decisions/0021-consumer-first-application-legibility-phase.md \
   docs/decisions/0022-control-plane-freeze-and-compatibility-runway.md \
   docs/decisions/0023-optional-consumer-ownership.md \
+  docs/decisions/0024-rust-harness-core-maintenance-cli.md \
   docs/compatibility/README.md \
   docs/provenance/README.md; do
   [[ -f "$root/$file" ]] || fail "missing source-only artifact: $file"
@@ -110,7 +111,9 @@ require PHASE4.md '## Evidence Matrix'
 require PHASE4.md 'warning runway'
 require PHASE4.md 'Complete on 2026-07-21.'
 require PHASE4.md '| P4-08 Deletion boundary'
-require docs/plans/README.md 'No active execution plans are currently indexed.'
+require docs/plans/README.md 'active/rust-harness-core-maintenance-cli.md'
+require docs/plans/active/rust-harness-core-maintenance-cli.md 'A Rust executable named `harness`.'
+require docs/plans/active/rust-harness-core-maintenance-cli.md 'optional SQLite control plane remains outside the CLI'
 require docs/plans/completed/README.md 'phase-4-control-plane-freeze.md'
 require docs/plans/completed/phase-4-control-plane-freeze.md 'Complete. New upstream work has one Git-native authority path.'
 require docs/decisions/README.md '0022-control-plane-freeze-and-compatibility-runway.md'
@@ -128,6 +131,8 @@ require PHASE5.md '## Ownership Matrix'
 require PHASE5.md 'tests/boundary/test-phase5-optional-consumer-split.sh'
 require docs/decisions/README.md '0023-optional-consumer-ownership.md'
 require docs/decisions/0023-optional-consumer-ownership.md '`hoangnb24/symphony` owns orchestration policy'
+require docs/decisions/README.md '0024-rust-harness-core-maintenance-cli.md'
+require docs/decisions/0024-rust-harness-core-maintenance-cli.md 'The next upstream product goal is a Rust CLI named `harness`.'
 require README.md 'Symphony owns work selection, agent runs, worktrees'
 require docs/compatibility/README.md 'Phase 5 ownership boundary'
 require docs/compatibility/README.md 'phase-5-evolution-infrastructure-legacy.md'

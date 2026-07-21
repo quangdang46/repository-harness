@@ -56,6 +56,12 @@ function Read-RemoteText([string]$Url) {
 }
 
 function Write-SourceFile([string]$Relative, [string]$Target) {
+    if ($Relative -eq "AGENTS.md") {
+        $block = (Read-SourceText "scripts/agent-harness-block.md").TrimEnd("`r", "`n")
+        Set-Content -LiteralPath $Target -Value ("# Agent Instructions`n`n" + $block + "`n") -NoNewline
+        return
+    }
+
     if ($script:Source.Mode -eq "local") {
         $source = Join-Path $script:Source.Root $Relative
         if (!(Test-Path $source)) {

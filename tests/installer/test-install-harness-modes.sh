@@ -44,6 +44,7 @@ cmp -s <(extract_block "$fresh/AGENTS.md") "$root/scripts/agent-harness-block.md
 [[ -f "$fresh/docs/plans/completed/README.md" ]]
 [[ -f "$fresh/docs/templates/exec-plan.md" ]]
 grep -Fq 'No Harness CLI operation is required.' "$fresh/AGENTS.md"
+! grep -Fq 'Current Upstream Goal' "$fresh/AGENTS.md"
 ! grep -Fq 'query matrix --active --summary' "$fresh/AGENTS.md"
 find "$fresh" -type f | sed "s#^$fresh/##" | sort >"$temp/fresh-files"
 sed -e '/^\s*#/d' -e '/^\s*$/d' "$root/scripts/harness-install-files.txt" | sort >"$temp/core-files"

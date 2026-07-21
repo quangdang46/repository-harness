@@ -196,6 +196,14 @@ write_source_file() {
   local relative="$1"
   local target="$2"
 
+  if [ "$relative" = "AGENTS.md" ]; then
+    {
+      printf '# Agent Instructions\n\n'
+      agent_shim_block
+    } > "$target"
+    return
+  fi
+
   if [ "$SOURCE_MODE" = "local" ]; then
     local source="$SOURCE_ROOT/$relative"
     [ -f "$source" ] || fail "Source file missing: $source"

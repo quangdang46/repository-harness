@@ -1,5 +1,12 @@
 # Agent Instructions
 
+## Current Upstream Goal
+
+Build `harness`, a Rust CLI installed with the default core that owns core
+installation, safe three-way updates, provenance, and diagnostics. Keep the
+optional SQLite lifecycle and orchestration control plane outside this CLI.
+Follow `docs/plans/active/rust-harness-core-maintenance-cli.md`.
+
 <!-- HARNESS:BEGIN -->
 ## Harness
 
