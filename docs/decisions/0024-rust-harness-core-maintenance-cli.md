@@ -76,5 +76,5 @@ Tradeoffs:
 
 ## Follow-Up
 
-Execute `docs/plans/active/rust-harness-core-maintenance-cli.md`. Update current
-product and installation documentation only as each new behavior becomes true.
+Implementation and validation are recorded in
+`docs/plans/completed/rust-harness-core-maintenance-cli.md`.

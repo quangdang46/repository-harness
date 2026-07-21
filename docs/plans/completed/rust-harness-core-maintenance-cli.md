@@ -4,7 +4,7 @@ Date: 2026-07-21
 
 ## Status
 
-Active
+Complete
 
 ## Outcome
 
@@ -127,9 +127,9 @@ renders results. Mechanical tests reject inward layers importing outward ones.
 - [x] Specify commands, ownership, provenance, conflict, and recovery contracts.
 - [x] Implement the independent Rust CLI and focused tests.
 - [x] Implement immutable bootstraps and existing-install migration.
-- [ ] Run cross-platform update and recovery proof.
+- [x] Run cross-platform update and recovery proof.
 - [x] Cut over current product documentation and default installation.
-- [ ] Run full repository validation and record the result.
+- [x] Run full repository validation and record the result.
 
 ## Decisions
 
@@ -148,11 +148,15 @@ renders results. Mechanical tests reject inward layers importing outward ones.
   recovery, apply failure rollback, path safety, and all-or-nothing writes.
 - Integration or end-to-end proof: the Bash installer profile, migration,
   upgrade, checksum failure, rollback, dry-run, and optional-consumer boundary
-  suites pass. Windows runtime evidence remains pending CI.
+  suites pass. PR #56's native Windows installer contract also passes.
 - Repository-required checks: `scripts/validate-premerge.sh` passes with the
-  full implementation. Native Windows installer/update proof remains pending
-  the pull-request workflow.
+  full implementation. PR #56's Linux repository contract and native Windows
+  installer contract pass on commit `f65f415`.
 
 ## Result
 
-Pending implementation and validation.
+Complete. The default installers now bootstrap the independent Rust `harness`
+binary, which installs or adopts the core and provides dry-run, transactional
+three-way updates, provenance, status, and diagnostics. The optional
+`harness-cli` SQLite control plane remains separate. Five-platform immutable
+release publication is wired to post-merge maintenance.
